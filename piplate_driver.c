@@ -27,7 +27,7 @@ static const struct of_device_id piplate_dt_ids[] = {
 MODULE_DEVICE_TABLE(of, piplate_dt_ids);
 
 static int piplate_spi_open(struct inode *inode, struct file *filp){
-	struct piplate_dev *dev = arduino_spi;
+	struct piplate_dev *dev = piplate_spi;
 
 	spin_lock_irq(&dev->spinlock);
 
@@ -59,16 +59,12 @@ static int piplate_spi_release(struct inode *inode, struct file *filp){
 	return 0;
 }
 
-static int piplate_spi_message(struct piplate_dev *dev, unsigned char addr, unsigned char cmd, unsigned char p1, unsigned char p2, int bytesToReturn){
-	unsigned char buf[4];
-	buf[0] = addr;//Add base depending on type
-	buf[1] = cmd;
-	buf[2] = p1;
-	buf[3] = p2;
+static int piplate_spi_message(struct piplate_dev *dev, int bytesToReturn){
 	struct spi_transfer transfer = {
-		.tx_buf = buf,
+		.tx_buf = &dev->tx_buf,
 		.len = 4,
 		.speed_hz = MAX_SPEED_HZ,
+		.delay_usecs = 60,//Not sure if this could cause the process to sleep. Almost confident the answer is no.
 	};
 
 	struct spi_message msg = { };
@@ -81,13 +77,31 @@ static int piplate_spi_message(struct piplate_dev *dev, unsigned char addr, unsi
 
 	status = spi_sync(dev->spi, &msg);
 
-	//Verify status
+	if(status)
+		return status;
 
 	if(bytesToReturn > 0){
-		//Wait
+		//Wait for 100/250 us (not sure what the best way to do this is yet)
+
+		transfer.tx_buf = NULL;
+		transfer.len = 1;
+		unsigned char rBuf[1];
+		transfer.rx_buf = &rBuf;
+		transfer.delay_usecs = 20;
+
+		//Not sure if I can reuse transfer or reuse message. I'm resuing transfer but not message at the moment as a middle ground.
+
 		for(int i = 0; i < bytesToReturn; i ++){
-			//Receive bytes one at a time
+			struct spi_message msg = { };
+			spi_message_init(&msg);
+			spi_message_add_tail(&transfer, &msg);
+			status = spi_sync(dev->spi, &msg);
+			if(status)
+				return status;
+			//Copy results to intermediate location, then copy to user.
 		}
+	}else if(bytesToReturn == -1){
+		//Receive bytes until exceeding 25 or until a 0 is received.
 	}
 
 	gpio_set_value(FRAME, 0);
@@ -108,6 +122,7 @@ static int piplate_ack_spi_message(struct piplate_dev *dev, unsigned char addr, 
 		.tx_buf = buf,
 		.len = 4,
 		.speed_hz = MAX_SPEED_HZ,
+		.delay_usecs = 5, //Once again, not sure if this causes the process to sleep.
 	};
 
 	struct spi_message msg = { };
@@ -128,7 +143,7 @@ static int piplate_ack_spi_message(struct piplate_dev *dev, unsigned char addr, 
 	if(bytesToReturn > 0){
 		for(int i = 0; i <= bytesToReturn; i++){
 			//Small delay
-			//Send/receive one byte, rinse and repeat. Last byte is sum of data for verification.
+			//Receive bytes
 		}
 	}else if(bytesToReturn == -1){
 		//Receive bytes until exceeding 25 or until a 0 is received.
@@ -143,7 +158,7 @@ static int piplate_ack_spi_message(struct piplate_dev *dev, unsigned char addr, 
 
 static int piplate_probe(struct spi_device *spi){
 	if(!piplate_spi){
-		piplate_spi = kzalloc(sizeof *arduino_spi, GFP_KERNEL);
+		piplate_spi = kzalloc(sizeof *piplate_spi, GFP_KERNEL);
 	}
 	if (!piplate_spi){
 		printk(KERN_INFO "Failed to allocate memory for spi device\n");
@@ -168,7 +183,7 @@ static int piplate_remove(struct spi_device *spi){
 	return 0;
 }
 
-static struct spi_driver arduino_driver = {
+static struct spi_driver piplate_driver = {
 	.driver = {
 		.name = "piplateSPI",
 		.owner = THIS_MODULE,
