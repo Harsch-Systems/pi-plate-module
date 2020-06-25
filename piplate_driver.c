@@ -10,10 +10,20 @@
 #include <linux/of.h>
 #include <linux/gpio.h>
 #include <linux/delay.h>
+#include <linux/sched.h>
 
 #include "piplate.h"
 
 MODULE_LICENSE("Dual BSD/GPL");
+
+struct piplate_dev {
+	struct spi_device *spi;
+	unsigned char tx_buf[4];
+	unsigned char rx_buf[BUF_SIZE];
+	unsigned int max_speed_hz;
+	spinlock_t spinlock;
+	bool opened;
+};
 
 struct piplate_dev *piplate_spi = NULL;
 static dev_t piplate_spi_num;
@@ -102,9 +112,6 @@ static int piplate_spi_message(struct piplate_dev *dev, unsigned char addr, unsi
 		//Not sure if I can reuse transfer or reuse message. I'm resuing transfer but not message at the moment as a middle ground.
 		int i;
 		for(i = 0; i < bytesToReturn; i ++){
-			struct spi_message msg = { };
-			spi_message_init(&msg);
-			spi_message_add_tail(&transfer, &msg);
 			status = spi_sync(dev->spi, &msg);
 			if(status)
 				return status;
@@ -135,7 +142,6 @@ static int piplate_spi_message(struct piplate_dev *dev, unsigned char addr, unsi
 	return 0;
 }
 
-
 static int piplate_ack_spi_message(struct piplate_dev *dev, unsigned char addr, unsigned char cmd, unsigned char p1, unsigned char p2, int bytesToReturn){
 	unsigned char buf[4];
 	buf[0] = addr;//Add base depending on type
@@ -156,27 +162,50 @@ static int piplate_ack_spi_message(struct piplate_dev *dev, unsigned char addr, 
 	spi_message_add_tail(&transfer, &msg);
 
 	//Confirm ACK bit is high
+	unsigned long j0 = jiffies;
+	while(!gpio_get_value(ACK)){
+		if(time_after(jiffies, j0 + (HZ/100)))
+			return -EIO;
+	}
 
 	gpio_set_value(FRAME, 1);
 
 	status = spi_sync(dev->spi, &msg);
 
-	//Verify status
+	if(status)
+		return status;
 
-	//Wait for ACK bit low
+	transfer.tx_buf = NULL;
+	transfer.len = 1;
+	unsigned char rBuf[1];
+	transfer.rx_buf = &rBuf;
+
+	//Wait for ACK bit to be low
+	j0 = jiffies;
+	while(gpio_get_value(ACK)){
+		if(time_after(jiffies, j0 + (HZ/100)))
+			return -EIO;
+	}
+
 	if(bytesToReturn > 0){
 		int i;
 		for(i = 0; i <= bytesToReturn; i++){
-			//Small delay
-			//Receive bytes
+			status = spi_sync(dev->spi, &msg);
+			if(status)
+				return status;
+			dev->rx_buf[i] = rBuf[0];
 		}
+		int sum = 0;
+		for(i = 0; i < bytesToReturn; i++)
+			sum += dev->rx_buf[i];
+		if((dev->rx_buf[bytesToReturn] & 0xFF) != (sum & 0xFF))
+			return -EIO;
+		gpio_set_value(FRAME, 0);
 	}else if(bytesToReturn == -1){
 		//Receive bytes until exceeding 25 or until a 0 is received.
 	}
 
 	gpio_set_value(FRAME, 0);
-
-	//Copy bytes to a user space buffer
 
 	return 0;
 }
@@ -198,20 +227,35 @@ static int piplate_probe(struct spi_device *spi){
 
 	spi_set_drvdata(spi, piplate_spi);
 
-	piplate_spi_message(piplate_spi, 24, 0, 0, 0, 1);
-
 	return 0;
 }
 
 static int piplate_remove(struct spi_device *spi){
-	struct piplate_dev *mydev = spi_get_drvdata(spi);
+	struct piplate_dev *dev = spi_get_drvdata(spi);
 
-	kfree(mydev);
+	kfree(dev);
 
 	return 0;
 }
 
 static long piplate_ioctl(struct file *filp, unsigned int cmd, unsigned long arg){
+	struct piplate_dev *dev = filp->private_data;
+
+	printk(KERN_INFO "Made it to ioctl call\n");
+
+	switch(cmd){
+		case PIPLATE_GETADDR: ;
+			unsigned char addr;
+			if(__get_user(addr, (int __user *)arg))
+				return -ENOMEM;
+			piplate_ack_spi_message(dev, addr, 0, 0, 0, 1);
+			__put_user(dev->rx_buf[0], (int __user *)arg);
+			break;
+
+		default:
+			return -EINVAL;
+			break;
+	}
 	return 0;
 }
 
