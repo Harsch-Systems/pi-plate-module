@@ -8,9 +8,9 @@
 		__overlay__ {
 			#address-cells = <1>;
 			#size-cells = <0>;			
-			arduinomini@0{
-				compatible = "arduinomini";
-				reg = <0>;
+			piplate@0{
+				compatible = "piplate";
+				reg = <1>;
 				spi-max-frequency = <1000000>;
 			};
 		};

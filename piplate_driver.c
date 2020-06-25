@@ -9,8 +9,9 @@
 #include <linux/uaccess.h>
 #include <linux/of.h>
 #include <linux/gpio.h>
+#include <linux/delay.h>
 
-#include "piplates.h"
+#include "piplate.h"
 
 MODULE_LICENSE("Dual BSD/GPL");
 
@@ -26,8 +27,10 @@ static const struct of_device_id piplate_dt_ids[] = {
 };
 MODULE_DEVICE_TABLE(of, piplate_dt_ids);
 
-static int piplate_spi_open(struct inode *inode, struct file *filp){
+static int piplate_open(struct inode *inode, struct file *filp){
 	struct piplate_dev *dev = piplate_spi;
+
+	printk(KERN_INFO "Opening file\n");
 
 	spin_lock_irq(&dev->spinlock);
 
@@ -45,7 +48,7 @@ static int piplate_spi_open(struct inode *inode, struct file *filp){
 	return 0;
 }
 
-static int piplate_spi_release(struct inode *inode, struct file *filp){
+static int piplate_release(struct inode *inode, struct file *filp){
 	struct piplate_dev *dev;
 	dev = filp->private_data;
 
@@ -59,12 +62,18 @@ static int piplate_spi_release(struct inode *inode, struct file *filp){
 	return 0;
 }
 
-static int piplate_spi_message(struct piplate_dev *dev, int bytesToReturn){
+static int piplate_spi_message(struct piplate_dev *dev, unsigned char addr, unsigned char cmd, unsigned char p1, unsigned char p2, int bytesToReturn){
+	printk(KERN_INFO "Sending message\n");
+	unsigned char tBuf[4];
+	tBuf[0] = addr;//Add base depending on type
+	tBuf[1] = cmd;
+	tBuf[2] = p1;
+	tBuf[3] = p2;
 	struct spi_transfer transfer = {
-		.tx_buf = &dev->tx_buf,
+		.tx_buf = &tBuf,
 		.len = 4,
 		.speed_hz = MAX_SPEED_HZ,
-		.delay_usecs = 60,//Not sure if this could cause the process to sleep. Almost confident the answer is no.
+		.delay_usecs = 60,
 	};
 
 	struct spi_message msg = { };
@@ -80,33 +89,48 @@ static int piplate_spi_message(struct piplate_dev *dev, int bytesToReturn){
 	if(status)
 		return status;
 
+	transfer.tx_buf = NULL;
+	transfer.len = 1;
+	unsigned char rBuf[1];
+	transfer.rx_buf = &rBuf;
+	transfer.delay_usecs = 20;
+
 	if(bytesToReturn > 0){
+		udelay(100);
 		//Wait for 100/250 us (not sure what the best way to do this is yet)
 
-		transfer.tx_buf = NULL;
-		transfer.len = 1;
-		unsigned char rBuf[1];
-		transfer.rx_buf = &rBuf;
-		transfer.delay_usecs = 20;
-
 		//Not sure if I can reuse transfer or reuse message. I'm resuing transfer but not message at the moment as a middle ground.
-
-		for(int i = 0; i < bytesToReturn; i ++){
+		int i;
+		for(i = 0; i < bytesToReturn; i ++){
 			struct spi_message msg = { };
 			spi_message_init(&msg);
 			spi_message_add_tail(&transfer, &msg);
 			status = spi_sync(dev->spi, &msg);
 			if(status)
 				return status;
-			//Copy results to intermediate location, then copy to user.
+			dev->rx_buf[i] = rBuf[0];
 		}
+
+		printk(KERN_INFO "Receiving buffer: %s\n", dev->rx_buf);
+
+		gpio_set_value(FRAME, 0);
+
+		return bytesToReturn;
+
 	}else if(bytesToReturn == -1){
-		//Receive bytes until exceeding 25 or until a 0 is received.
+		int count = 0;
+		while(count < 20){
+			//Send message
+			if(rBuf[0] != 0){
+				//process value
+				count ++;
+			}else{
+				count = 20;
+			}
+		}
 	}
 
 	gpio_set_value(FRAME, 0);
-
-	//Copy bytes to a user space buffer
 
 	return 0;
 }
@@ -119,10 +143,10 @@ static int piplate_ack_spi_message(struct piplate_dev *dev, unsigned char addr, 
 	buf[2] = p1;
 	buf[3] = p2;
 	struct spi_transfer transfer = {
-		.tx_buf = buf,
+		.tx_buf = &buf,
 		.len = 4,
 		.speed_hz = MAX_SPEED_HZ,
-		.delay_usecs = 5, //Once again, not sure if this causes the process to sleep.
+		.delay_usecs = 5,
 	};
 
 	struct spi_message msg = { };
@@ -141,7 +165,8 @@ static int piplate_ack_spi_message(struct piplate_dev *dev, unsigned char addr, 
 
 	//Wait for ACK bit low
 	if(bytesToReturn > 0){
-		for(int i = 0; i <= bytesToReturn; i++){
+		int i;
+		for(i = 0; i <= bytesToReturn; i++){
 			//Small delay
 			//Receive bytes
 		}
@@ -157,6 +182,7 @@ static int piplate_ack_spi_message(struct piplate_dev *dev, unsigned char addr, 
 }
 
 static int piplate_probe(struct spi_device *spi){
+	printk(KERN_INFO "Probing...\n");
 	if(!piplate_spi){
 		piplate_spi = kzalloc(sizeof *piplate_spi, GFP_KERNEL);
 	}
@@ -172,6 +198,8 @@ static int piplate_probe(struct spi_device *spi){
 
 	spi_set_drvdata(spi, piplate_spi);
 
+	piplate_spi_message(piplate_spi, 24, 0, 0, 0, 1);
+
 	return 0;
 }
 
@@ -180,6 +208,10 @@ static int piplate_remove(struct spi_device *spi){
 
 	kfree(mydev);
 
+	return 0;
+}
+
+static long piplate_ioctl(struct file *filp, unsigned int cmd, unsigned long arg){
 	return 0;
 }
 
@@ -195,9 +227,9 @@ static struct spi_driver piplate_driver = {
 
 static const struct file_operations piplate_fops = {
 	.owner = THIS_MODULE,
-	.open = piplate_spi_open,
-	.release = piplate_spi_release,
-	.ioctl = piplate_spi_ioctl,
+	.open = piplate_open,
+	.release = piplate_release,
+	.unlocked_ioctl = piplate_ioctl,
 };
 
 static int __init piplate_spi_init(void){
