@@ -12,10 +12,15 @@ int main() {
 		exit(1);
 	}
 
-	unsigned char val = 53;
-	ioctl(fileno(fp), PIPLATE_GETADDR, &val);
+	struct message m = BASE_MESSAGE;
+	m.addr = 24;
+	//m.p1 =
+	//m.p2 =
+	m.useACK = 0;
 
-	printf("%d\n", val);
+	printf("Return: %d\n", ioctl(fileno(fp), PIPLATE_GETADDR, &m));
+
+	printf("Result: %s\n", m.rBuf);
 
 	fclose(fp);
 
