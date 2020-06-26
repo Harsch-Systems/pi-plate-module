@@ -2,7 +2,7 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/device.h>
-#include <linux/spinlock.h>
+#include <linux/mutex.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/cdev.h>
@@ -21,8 +21,7 @@ struct piplate_dev {
 	unsigned char tx_buf[4];
 	unsigned char rx_buf[1];
 	unsigned int max_speed_hz;
-	spinlock_t spinlock;
-	bool opened;
+	struct mutex lock;
 };
 
 struct piplate_dev *piplate_spi = NULL;
@@ -42,39 +41,20 @@ static int piplate_open(struct inode *inode, struct file *filp){
 
 	printk(KERN_INFO "Opening file\n");
 
-	spin_lock_irq(&dev->spinlock);
-
-	if(dev->opened){
-		printk(KERN_INFO "Cannot open device file twice\n");
-		spin_unlock_irq(&dev->spinlock);
-		return -EIO;
-	}
-
-	dev->opened = true;
 	filp->private_data = dev;
-
-	spin_unlock_irq(&dev->spinlock);
 
 	return 0;
 }
 
 static int piplate_release(struct inode *inode, struct file *filp){
-	struct piplate_dev *dev;
-	dev = filp->private_data;
-
-	spin_lock_irq(&dev->spinlock);
-
 	filp->private_data = NULL;
-	dev->opened = false;
-
-	spin_unlock_irq(&dev->spinlock);
 
 	return 0;
 }
 
-static int piplate_spi_message(struct piplate_dev *dev, struct message *m, unsigned char cmd, int bytesToReturn){
+static int piplate_spi_message(struct piplate_dev *dev, struct message *m, int bytesToReturn){
 	dev->tx_buf[0] = m->addr;
-	dev->tx_buf[1] = cmd;
+	dev->tx_buf[1] = m->cmd;
 	dev->tx_buf[2] = m->p1;
 	dev->tx_buf[3] = m->p2;
 	struct spi_transfer transfer = {
@@ -113,7 +93,7 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m, unsig
 	if(m->useACK)
 		transfer.delay_usecs = 20;
 
-	if(bytesToReturn > 0){
+	if(bytesToReturn > 0 || bytesToReturn == -1){
 		if(m->useACK){
 			j0 = jiffies;
 			while(gpio_get_value(ACK)){
@@ -125,7 +105,8 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m, unsig
 		}else{
 			udelay(100);
 		}
-
+	}
+	if(bytesToReturn > 0){
 		int i;
 		int max = bytesToReturn + m->useACK;//Newer ACK pi plates include extra verification response byte
 		for(i = 0; i < max; i++){
@@ -142,14 +123,40 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m, unsig
 			for(i = 0; i < bytesToReturn; i++)
 				sum += m->rBuf[i];
 
-			if((m->rBuf[bytesToReturn] & 0xFF) != (sum & 0xFF)){
+			if((~(m->rBuf[bytesToReturn]) & 0xFF) != (sum & 0xFF)){
 				printk(KERN_INFO "Failed transfer\n");
 				gpio_set_value(FRAME, 0);
 				return -EIO;
 			}
 		}
 	}else if(bytesToReturn == -1){
-		//Receive bytes until exceeding 25 or until a 0 is received.
+		int count = 0;
+		int sum = 0;
+		while (count < 25){
+			status = spi_sync(dev->spi, &msg);
+			if(status){
+				gpio_set_value(FRAME, 0);
+				return status;
+			}
+			if(dev->rx_buf[0] != 0){
+				m->rBuf[count] = dev->rx_buf[0];
+				sum += dev->rx_buf[0];
+				count++;
+			}else{
+				m->rBuf[count + 1] = '\0';
+				if(m->useACK){
+					status = spi_sync(dev->spi, &msg);
+					if(status){
+						gpio_set_value(FRAME, 0);
+						return status;
+					}
+					if((~(dev->rx_buf[0]) & 0xFF) != (sum & 0xFF)){
+						return -EIO;
+					}
+				}
+				count = 25;
+			}
+		}
 	}
 
 	gpio_set_value(FRAME, 0);
@@ -158,7 +165,6 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m, unsig
 }
 
 static int piplate_probe(struct spi_device *spi){
-	printk(KERN_INFO "Probing...\n");
 	if(!piplate_spi){
 		piplate_spi = kzalloc(sizeof *piplate_spi, GFP_KERNEL);
 	}
@@ -169,10 +175,11 @@ static int piplate_probe(struct spi_device *spi){
 
 	spi->mode = SPI_MODE_0;
 	piplate_spi->spi = spi;
-	piplate_spi->opened = false;
 	piplate_spi->max_speed_hz = MAX_SPEED_HZ;
 
 	spi_set_drvdata(spi, piplate_spi);
+
+	//TODO: Find available plates and save them for future reference.
 
 	return 0;
 }
@@ -190,14 +197,25 @@ static long piplate_ioctl(struct file *filp, unsigned int cmd, unsigned long arg
 
 	struct message *m = kmalloc(sizeof(struct message), GFP_DMA);
 
+	int error;
+
 	if(copy_from_user(m, (void *)arg, sizeof(struct message)))
 		return -ENOMEM;
 
-	switch(cmd){
-		case PIPLATE_GETADDR:
-			piplate_spi_message(dev, m, 0, 1);
-			break;
+	int bytes = m->bytesToReturn;
 
+	switch(cmd){
+		case PIPLATE_SENDCMD:
+			if(mutex_lock_interruptible(&dev->lock))
+				return -EINTR;
+
+			if((error = piplate_spi_message(dev, m, bytes))){
+				mutex_unlock(&dev->lock);
+				return error;
+			}
+
+			mutex_unlock(&dev->lock);
+			break;
 		default:
 			return -EINVAL;
 			break;
@@ -257,7 +275,7 @@ static int __init piplate_spi_init(void){
 		goto free_ack;
 	}
 
-	spin_lock_init(&piplate_spi->spinlock);
+	mutex_init(&piplate_spi->lock);
 
 	if(alloc_chrdev_region(&piplate_spi_num, 0, 1, DEV_NAME) < 0){
 		printk(KERN_INFO "Error while allocating device number\n");
@@ -292,7 +310,7 @@ static int __init piplate_spi_init(void){
 		goto destroy_class;
 	}
 
-	if(registered = spi_register_driver(&piplate_driver)){
+	if((registered = spi_register_driver(&piplate_driver))){
 		printk(KERN_INFO "Error while registering driver\n");
 		error = -ENOMEM;
 		goto destroy_dev;

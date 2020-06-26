@@ -14,22 +14,24 @@
 //Ioctl Definitions:
 #define PIPLATE_IOC_MAG 'Q'
 
-#define PIPLATE_GETADDR _IOWR(PIPLATE_IOC_MAG, 0, int)
-#define PIPLATE_GETID _IOWR(PIPLATE_IOC_MAG, 1, int)
+#define PIPLATE_SENDCMD _IOWR(PIPLATE_IOC_MAG, 0, int)
 
 struct message {
 	unsigned char addr;
+	unsigned char cmd;
 	unsigned char p1;
 	unsigned char p2;
 	unsigned char rBuf[BUF_SIZE];
+	int bytesToReturn;
 	bool useACK;
 };
 
 const struct message BASE_MESSAGE = {
 	.addr = 0,
+	.cmd = 0,
 	.p1 = 0,
 	.p2 = 0,
-	.rBuf = NULL,
+	.bytesToReturn = 0,
 	.useACK = 0,
 };
 
