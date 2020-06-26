@@ -1,18 +1,17 @@
 #include <linux/spi/spi.h>
 #include <linux/module.h>
-#include <linux/init.h>
-#include <linux/device.h>
 #include <linux/mutex.h>
-#include <linux/kernel.h>
-#include <linux/types.h>
 #include <linux/cdev.h>
 #include <linux/uaccess.h>
-#include <linux/of.h>
 #include <linux/gpio.h>
 #include <linux/delay.h>
 #include <linux/sched.h>
+#include <linux/moduleparam.h>
 
 #include "piplate.h"
+
+//static int use_debug_mode = 0;
+//module_param(use_debug_mode, bool, S_IRUGO);
 
 MODULE_LICENSE("Dual BSD/GPL");
 
@@ -34,6 +33,7 @@ static const struct of_device_id piplate_dt_ids[] = {
 	{ .compatible = "piplate" },
 	{},
 };
+
 MODULE_DEVICE_TABLE(of, piplate_dt_ids);
 
 static int piplate_open(struct inode *inode, struct file *filp){
@@ -57,6 +57,7 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m, int b
 	dev->tx_buf[1] = m->cmd;
 	dev->tx_buf[2] = m->p1;
 	dev->tx_buf[3] = m->p2;
+
 	struct spi_transfer transfer = {
 		.tx_buf = &dev->tx_buf,
 		.len = 4,
@@ -66,16 +67,18 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m, int b
 
 	struct spi_message msg = { };
 	int status;
+	unsigned long j0;
 
 	spi_message_init(&msg);
 	spi_message_add_tail(&transfer, &msg);
 
 	//Confirm ACK bit is high
-	unsigned long j0 = jiffies;
 	if(m->useACK){
+		j0 = jiffies;
 		while(!gpio_get_value(ACK)){
 			if(time_after(jiffies, j0 + (HZ/100))){
-				return -EIO;
+				status = -EIO;
+				goto end;
 			}
 		}
 	}
@@ -85,7 +88,7 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m, int b
 	status = spi_sync(dev->spi, &msg);
 
 	if(status)
-		return status;
+		goto end;
 
 	transfer.tx_buf = NULL;
 	transfer.len = 1;
@@ -98,8 +101,8 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m, int b
 			j0 = jiffies;
 			while(gpio_get_value(ACK)){
 				if(time_after(jiffies, j0 + (HZ/100))){
-					gpio_set_value(FRAME, 0);
-					return -EIO;
+					status = -EIO;
+					goto end;
 				}
 			}
 		}else{
@@ -111,10 +114,8 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m, int b
 		int max = bytesToReturn + m->useACK;//Newer ACK pi plates include extra verification response byte
 		for(i = 0; i < max; i++){
 			status = spi_sync(dev->spi, &msg);
-			if(status){
-				gpio_set_value(FRAME, 0);
-				return status;
-			}
+			if(status)
+				goto end;
 			m->rBuf[i] = dev->rx_buf[0];
 		}
 
@@ -124,9 +125,8 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m, int b
 				sum += m->rBuf[i];
 
 			if((~(m->rBuf[bytesToReturn]) & 0xFF) != (sum & 0xFF)){
-				printk(KERN_INFO "Failed transfer\n");
-				gpio_set_value(FRAME, 0);
-				return -EIO;
+				status = -EIO;
+				goto end;
 			}
 		}
 	}else if(bytesToReturn == -1){
@@ -134,10 +134,8 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m, int b
 		int sum = 0;
 		while (count < 25){
 			status = spi_sync(dev->spi, &msg);
-			if(status){
-				gpio_set_value(FRAME, 0);
-				return status;
-			}
+			if(status)
+				goto end;
 			if(dev->rx_buf[0] != 0){
 				m->rBuf[count] = dev->rx_buf[0];
 				sum += dev->rx_buf[0];
@@ -146,12 +144,11 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m, int b
 				m->rBuf[count + 1] = '\0';
 				if(m->useACK){
 					status = spi_sync(dev->spi, &msg);
-					if(status){
-						gpio_set_value(FRAME, 0);
-						return status;
-					}
+					if(status)
+						goto end;
 					if((~(dev->rx_buf[0]) & 0xFF) != (sum & 0xFF)){
-						return -EIO;
+						status = -EIO;
+						goto end;
 					}
 				}
 				count = 25;
@@ -162,6 +159,10 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m, int b
 	gpio_set_value(FRAME, 0);
 
 	return 0;
+
+	end:
+		gpio_set_value(FRAME, 0);
+		return status;
 }
 
 static int piplate_probe(struct spi_device *spi){
@@ -202,14 +203,12 @@ static long piplate_ioctl(struct file *filp, unsigned int cmd, unsigned long arg
 	if(copy_from_user(m, (void *)arg, sizeof(struct message)))
 		return -ENOMEM;
 
-	int bytes = m->bytesToReturn;
-
 	switch(cmd){
 		case PIPLATE_SENDCMD:
 			if(mutex_lock_interruptible(&dev->lock))
 				return -EINTR;
 
-			if((error = piplate_spi_message(dev, m, bytes))){
+			if((error = piplate_spi_message(dev, m, m->bytesToReturn))){
 				mutex_unlock(&dev->lock);
 				return error;
 			}

@@ -13,12 +13,12 @@ int main() {
 	}
 
 	struct message m = BASE_MESSAGE;
-	m.addr = 53;//53 is tinker, 24 is relay
+	m.addr = 24;//53 is tinker, 24 is relay, 36 is DAQC2
 	m.cmd = 0x01;
-	//m.p1 =
+	//m.p1 = 2;
 	//m.p2 =
 	m.bytesToReturn = -1;
-	m.useACK = 1;
+	m.useACK = 0;
 
 	int i;
 	for(i = 0; i < 1000; i++){
