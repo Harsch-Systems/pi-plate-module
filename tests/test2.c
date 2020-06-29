@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <sys/ioctl.h>
 
-#include "piplate.h"
+#include "../module/piplate.h"
 
 int main() {
 	FILE *fp;
