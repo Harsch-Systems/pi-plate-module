@@ -38,11 +38,11 @@ result.
 Device Tree Overlay
 -------------------
 
-Use the device tree compiler (dtc) to compile the .dts file into a .dtbo file.
-dtc -@ -I dts -O dtb -o piplate.dtbo piplate_overlay.dts
+Use the device tree compiler (dtc) to compile the .dts file into a .dtbo file.  
+dtc -@ -I dts -O dtb -o piplate.dtbo piplate_overlay.dts  
 
-Then move the piplate.dtbo file into /boot/overlays
-sudo mv piplate.dtbo /boot/overlays/piplate.dtbo
+Then move the piplate.dtbo file into /boot/overlays  
+sudo mv piplate.dtbo /boot/overlays/piplate.dtbo  
 
 Finally, tell the kernel to use the device tree binary by adding dtoverlay=piplate to the end of /boot/config.txt and restart the pi.
 
