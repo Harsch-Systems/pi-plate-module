@@ -8,9 +8,6 @@
 #define DEV_NAME "PiPlates"
 #define MAX_SPEED_HZ 500000
 
-#define FRAME 25
-#define ACK 23
-
 //Ioctl Definitions:
 #define PIPLATE_IOC_MAG 'Q'
 
@@ -24,6 +21,7 @@ struct message {
 	unsigned char rBuf[BUF_SIZE];
 	int bytesToReturn;
 	bool useACK;
+	bool state;
 };
 
 const struct message BASE_MESSAGE = {
@@ -33,6 +31,7 @@ const struct message BASE_MESSAGE = {
 	.p2 = 0,
 	.bytesToReturn = 0,
 	.useACK = 0,
+	.state = 0,
 };
 
 #endif /* PIPLATE_H_INCLUDED */

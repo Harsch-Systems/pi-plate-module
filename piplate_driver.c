@@ -1,3 +1,42 @@
+/*
+	Using this device
+	-----------------
+
+	This driver is designed for the raspberry pi
+	"Pi-Plates" product. In order to use it, you
+	must have either the DAQCplate, DAQC2plate,
+	TINKERplate, THERMOplate, RELAYplate, or
+	MOTORplate attached to the raspberry pi.
+
+	To use the driver, send the ioctl command
+	"PIPLATE_SENDCMD" with the message struct as
+	an input.
+
+	struct message {
+		unsigned char addr;
+		unsigned char cmd;
+		unsigned char p1;
+		unsigned char p2;
+		unsigned char rxBuf[BUF_SIZE];
+		int bytesToReturn;
+		bool useACK;
+		bool state;
+	}
+
+	The plates are designed in one of
+	two ways: The DAQC2plate, TINKERplate, and
+	THERMOplate all use an extra pin (#23) in
+	order to acknowledge when they are ready to
+	send a response. The other three plates do
+	not. For this reason, the message struct
+	contains an extra parameter useACK in order
+	to specify the type of plate.
+
+	After a successful transfer, state will be set
+	to true and rxBuf will be filled with the
+	result.
+*/
+
 #include <linux/spi/spi.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -10,10 +49,23 @@
 
 #include "piplate.h"
 
-//static int use_debug_mode = 0;
-//module_param(use_debug_mode, bool, S_IRUGO);
+#define FRAME 25
+#define ACK 23
 
-MODULE_LICENSE("Dual BSD/GPL");
+/*
+  Defines the debug level. Three options available:
+  0: Doesn't log anything.
+  1: Logs errors
+  2: Logs errors and extra debug info
+  The default level is 1.
+*/
+
+#define DEBUG_LEVEL_NONE 0
+#define DEBUG_LEVEL_ERR 1
+#define DEBUG_LEVEL_ALL 2
+
+static int debug_level = DEBUG_LEVEL_ERR;
+module_param(debug_level, int, S_IRUSR | S_IWUSR);
 
 struct piplate_dev {
 	struct spi_device *spi;
@@ -29,8 +81,9 @@ static struct cdev *piplate_spi_cdev;
 static struct class *piplate_spi_class;
 static struct device *piplate_spi_dev;
 
+
 static const struct of_device_id piplate_dt_ids[] = {
-	{ .compatible = "piplate" },
+	{ .compatible = "piplate" }, //This name must be the same as whatever is in the device tree
 	{},
 };
 
@@ -39,44 +92,64 @@ MODULE_DEVICE_TABLE(of, piplate_dt_ids);
 static int piplate_open(struct inode *inode, struct file *filp){
 	struct piplate_dev *dev = piplate_spi;
 
-	printk(KERN_INFO "Opening file\n");
-
 	filp->private_data = dev;
+
+	if(debug_level == DEBUG_LEVEL_ALL)
+		printk(KERN_DEBUG "Pi Plate File Opened");
 
 	return 0;
 }
 
 static int piplate_release(struct inode *inode, struct file *filp){
+	if(debug_level == DEBUG_LEVEL_ALL)
+		printk(KERN_DEBUG "Pi Plate File Released");
+
 	filp->private_data = NULL;
 
 	return 0;
 }
 
-static int piplate_spi_message(struct piplate_dev *dev, struct message *m, int bytesToReturn){
+
+/*
+  Sends a message to the pi plate given the information in message m.
+  m has already been copied from user space in ioctl, so this does
+  not need to worry about user space access.
+*/
+static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
+	struct spi_message msg = { };
+	int status;
+	unsigned long j0;
+	struct spi_transfer transfer = { };
+
 	dev->tx_buf[0] = m->addr;
 	dev->tx_buf[1] = m->cmd;
 	dev->tx_buf[2] = m->p1;
 	dev->tx_buf[3] = m->p2;
 
-	struct spi_transfer transfer = {
-		.tx_buf = &dev->tx_buf,
-		.len = 4,
-		.speed_hz = dev->max_speed_hz,
-		.delay_usecs = (m->useACK ? 5 : 60),
-	};
-
-	struct spi_message msg = { };
-	int status;
-	unsigned long j0;
+	transfer.tx_buf = &dev->tx_buf;
+	transfer.len = 4;
+	transfer.speed_hz = dev->max_speed_hz;
+	transfer.delay_usecs = (m->useACK ? 5 : 60);
 
 	spi_message_init(&msg);
 	spi_message_add_tail(&transfer, &msg);
 
-	//Confirm ACK bit is high
+	if(debug_level == DEBUG_LEVEL_ALL){
+		if(m->useACK)
+			printk(KERN_DEBUG "Sending command to Pi Plate using ACK wire (TINKERplate, DAQC2plate, THERMOplate)");
+		else
+			printk(KERN_DEBUG "Sending command to Pi Plate without ACK wire (DAQCplate, RELAYplate, MOTORplate)");
+		printk(KERN_DEBUG "Address: %d\n", m->addr);
+		printk(KERN_DEBUG "Command number: %d\n", m->cmd);
+	}
+
+	//Confirm ACK bit is high before transfer begins
 	if(m->useACK){
 		j0 = jiffies;
 		while(!gpio_get_value(ACK)){
 			if(time_after(jiffies, j0 + (HZ/100))){
+				if(debug_level >= DEBUG_LEVEL_ERR)
+					printk(KERN_ERR "Timed out while confirming ACK bit high");
 				status = -EIO;
 				goto end;
 			}
@@ -87,20 +160,27 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m, int b
 
 	status = spi_sync(dev->spi, &msg);
 
-	if(status)
+	if(status){
+		if(debug_level >= DEBUG_LEVEL_ERR)
+			printk(KERN_ERR "Unknown error while sending SPI command");
 		goto end;
+	}
 
+	//Reuse the same transfer for receiving data now
 	transfer.tx_buf = NULL;
 	transfer.len = 1;
 	transfer.rx_buf = dev->rx_buf;
 	if(m->useACK)
 		transfer.delay_usecs = 20;
 
-	if(bytesToReturn > 0 || bytesToReturn == -1){
+	//Handles different delay systems. If using ACK, wait for that to go low. Otherwise, delay for 100us.
+	if(m->bytesToReturn > 0 || m->bytesToReturn == -1){
 		if(m->useACK){
 			j0 = jiffies;
 			while(gpio_get_value(ACK)){
 				if(time_after(jiffies, j0 + (HZ/100))){
+					if(debug_level >= DEBUG_LEVEL_ERR)
+						printk(KERN_ERR "Timed out while waiting for ACK bit low");
 					status = -EIO;
 					goto end;
 				}
@@ -109,27 +189,33 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m, int b
 			udelay(100);
 		}
 	}
-	if(bytesToReturn > 0){
+
+	if(m->bytesToReturn > 0){
 		int i;
-		int max = bytesToReturn + m->useACK;//Newer ACK pi plates include extra verification response byte
+		int max = m->bytesToReturn + m->useACK;//Newer ACK pi plates include extra verification response byte
 		for(i = 0; i < max; i++){
 			status = spi_sync(dev->spi, &msg);
-			if(status)
+			if(status){
+				if(debug_level >= DEBUG_LEVEL_ERR)
+					printk(KERN_ERR "Unknown error while receiving SPI data");
 				goto end;
+			}
 			m->rBuf[i] = dev->rx_buf[0];
 		}
 
-		if(m->useACK){
+		if(m->useACK){//Verify that last byte in sum of receiving values equals last received byte inverted
 			int sum = 0;
-			for(i = 0; i < bytesToReturn; i++)
+			for(i = 0; i < m->bytesToReturn; i++)
 				sum += m->rBuf[i];
 
-			if((~(m->rBuf[bytesToReturn]) & 0xFF) != (sum & 0xFF)){
+			if((~(m->rBuf[m->bytesToReturn]) & 0xFF) != (sum & 0xFF)){
+				if(debug_level >= DEBUG_LEVEL_ERR)
+					printk(KERN_ERR "Error while receiving data: Did not match verification byte");
 				status = -EIO;
 				goto end;
 			}
 		}
-	}else if(bytesToReturn == -1){
+	}else if(m->bytesToReturn == -1){//Just keep receiving bytes until passing 25 or receiving 0. (getID)
 		int count = 0;
 		int sum = 0;
 		while (count < 25){
@@ -144,9 +230,14 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m, int b
 				m->rBuf[count + 1] = '\0';
 				if(m->useACK){
 					status = spi_sync(dev->spi, &msg);
-					if(status)
+					if(status){
+						if(debug_level >= DEBUG_LEVEL_ERR)
+							printk(KERN_ERR "Unknown error while receiving SPI data");
 						goto end;
+					}
 					if((~(dev->rx_buf[0]) & 0xFF) != (sum & 0xFF)){
+						if(debug_level >= DEBUG_LEVEL_ERR)
+							printk(KERN_ERR "Error while receiving data: Did not match verification byte");
 						status = -EIO;
 						goto end;
 					}
@@ -158,19 +249,27 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m, int b
 
 	gpio_set_value(FRAME, 0);
 
+	if(debug_level == DEBUG_LEVEL_ALL)
+		printk(KERN_DEBUG "Message sent successfully");
+
 	return 0;
 
+	//Goto statement that ensures the FRAME is set low if an error occurs at any point
 	end:
 		gpio_set_value(FRAME, 0);
 		return status;
 }
 
 static int piplate_probe(struct spi_device *spi){
-	if(!piplate_spi){
+	if(debug_level == DEBUG_LEVEL_ALL)
+		printk(KERN_DEBUG "Probing SPI device");
+
+	if(!piplate_spi){//Verify there wasn't an error when allocating space for spi struct.
 		piplate_spi = kzalloc(sizeof *piplate_spi, GFP_KERNEL);
 	}
 	if (!piplate_spi){
-		printk(KERN_INFO "Failed to allocate memory for spi device\n");
+		if(debug_level >= DEBUG_LEVEL_ERR)
+			printk(KERN_ERR "Failed to allocate memory for spi device\n");
 		return -ENOMEM;
 	}
 
@@ -180,8 +279,6 @@ static int piplate_probe(struct spi_device *spi){
 
 	spi_set_drvdata(spi, piplate_spi);
 
-	//TODO: Find available plates and save them for future reference.
-
 	return 0;
 }
 
@@ -189,6 +286,9 @@ static int piplate_remove(struct spi_device *spi){
 	struct piplate_dev *dev = spi_get_drvdata(spi);
 
 	kfree(dev);
+
+	if(debug_level == DEBUG_LEVEL_ALL)
+		printk(KERN_DEBUG "SPI device removed");
 
 	return 0;
 }
@@ -200,15 +300,20 @@ static long piplate_ioctl(struct file *filp, unsigned int cmd, unsigned long arg
 
 	int error;
 
-	if(copy_from_user(m, (void *)arg, sizeof(struct message)))
+	if(copy_from_user(m, (void *)arg, sizeof(struct message))){
+		if(debug_level >= DEBUG_LEVEL_ERR)
+			printk(KERN_ERR "Could not copy input from user space, possible invalid pointer");
 		return -ENOMEM;
+	}
 
 	switch(cmd){
 		case PIPLATE_SENDCMD:
 			if(mutex_lock_interruptible(&dev->lock))
 				return -EINTR;
 
-			if((error = piplate_spi_message(dev, m, m->bytesToReturn))){
+			if((error = piplate_spi_message(dev, m))){
+				if(debug_level >= DEBUG_LEVEL_ERR)
+					printk(KERN_ERR "Failed to send message");
 				mutex_unlock(&dev->lock);
 				return error;
 			}
@@ -216,12 +321,19 @@ static long piplate_ioctl(struct file *filp, unsigned int cmd, unsigned long arg
 			mutex_unlock(&dev->lock);
 			break;
 		default:
+			if(debug_level >= DEBUG_LEVEL_ERR)
+				printk(KERN_ERR "Invalid command");
 			return -EINVAL;
 			break;
 	}
 
-	if(copy_to_user((void *)arg, m, sizeof(struct message)))
+	m->state = 1;
+
+	if(copy_to_user((void *)arg, m, sizeof(struct message))){
+		if(debug_level >= DEBUG_LEVEL_ERR)
+			printk(KERN_ERR "Failed to copy message results back to user space");
 		return -ENOMEM;
+	}
 
 	return 0;
 }
@@ -244,87 +356,92 @@ static const struct file_operations piplate_fops = {
 };
 
 static int __init piplate_spi_init(void){
-	int registered;
-
 	int error;
 
-	printk(KERN_INFO "Loading module...\n");
+	if(debug_level == DEBUG_LEVEL_ALL)
+		printk(KERN_DEBUG "Loading module...\n");
 
-	if(gpio_request(FRAME, "FRAME")){
-		printk(KERN_INFO "Can't request FRAME pin\n");
-		error = -ENOMEM;
+	if((error = gpio_request(FRAME, "FRAME"))){
+		if(debug_level >= DEBUG_LEVEL_ERR)
+			printk(KERN_ERR "Failiure to request FRAME pin\n");
 		goto end;
 	}
 
-	if(gpio_request(ACK, "ACK")){
-		printk(KERN_INFO "Can't request ACK pin\n");
-		error = -ENOMEM;
+	if((error = gpio_request(ACK, "ACK"))){
+		if(debug_level >= DEBUG_LEVEL_ERR)
+			printk(KERN_ERR "Failiure to request ACK pin\n");
 		goto free_frame;
 	}
 
 	if(gpio_direction_input(ACK) || gpio_direction_output(FRAME, 0)){
-		printk(KERN_INFO "Can't set input/output mode for pins\n");
-		error = -ENOMEM;
+		if(debug_level >= DEBUG_LEVEL_ERR)
+			printk(KERN_ERR "Can't set input/output mode for pins\n");
+		error = -EPERM;
 		goto free_ack;
 	}
 
 	if(!(piplate_spi = kzalloc(sizeof(*piplate_spi), GFP_KERNEL))){
-		printk(KERN_INFO "Can't allocate memory for spi device");
+		if(debug_level >= DEBUG_LEVEL_ERR)
+			printk(KERN_ERR "Can't allocate memory for spi device");
 		error = -ENOMEM;
 		goto free_ack;
 	}
 
 	mutex_init(&piplate_spi->lock);
 
-	if(alloc_chrdev_region(&piplate_spi_num, 0, 1, DEV_NAME) < 0){
-		printk(KERN_INFO "Error while allocating device number\n");
-		error = -ENOMEM;
+	if((error = alloc_chrdev_region(&piplate_spi_num, 0, 1, DEV_NAME))){
+		if(debug_level >= DEBUG_LEVEL_ERR)
+			printk(KERN_ERR "Error while allocating device number\n");
 		goto free_mem;
 	}
 
-	if(!(piplate_spi_cdev = cdev_alloc())){
-		printk(KERN_INFO "Error allocating memory for cdev struct\n");
+	if(!(piplate_spi_class = class_create(THIS_MODULE, DEV_NAME))){
+		if(debug_level >= DEBUG_LEVEL_ERR)
+			printk(KERN_ERR "Error while creating device class\n");
 		error = -ENOMEM;
 		goto unregister_chrdev;
+	}
+
+	if(!(piplate_spi_dev = device_create(piplate_spi_class, NULL, piplate_spi_num, NULL, "%s", DEV_NAME))){
+		if(debug_level >= DEBUG_LEVEL_ERR)
+			printk(KERN_ERR "Error while creating device\n");
+		error = -ENOMEM;
+		goto destroy_class;
+	}
+
+	if((error = spi_register_driver(&piplate_driver))){
+		if(debug_level >= DEBUG_LEVEL_ERR)
+			printk(KERN_ERR "Error while registering driver\n");
+		goto destroy_dev;
+	}
+
+	if(!(piplate_spi_cdev = cdev_alloc())){
+		if(debug_level >= DEBUG_LEVEL_ERR)
+			printk(KERN_ERR "Error allocating memory for cdev struct\n");
+		error = -ENOMEM;
+		goto unregister_spi;
 	}
 
 	piplate_spi_cdev->owner = THIS_MODULE;
 	piplate_spi_cdev->ops = &piplate_fops;
 
-	if(cdev_add(piplate_spi_cdev, piplate_spi_num, 1)){
-		printk(KERN_INFO "Failed to add cdev object\n");
-		error = -ENOMEM;
-		goto unregister_chrdev;
+	if((error = cdev_add(piplate_spi_cdev, piplate_spi_num, 1))){
+		if(debug_level >= DEBUG_LEVEL_ERR)
+			printk(KERN_ERR "Failed to add cdev object\n");
+		goto unregister_spi;
 	}
 
-	if(!(piplate_spi_class = class_create(THIS_MODULE, DEV_NAME))){
-		printk(KERN_INFO "Error while creating device class\n");
-		error = -ENOMEM;
-		goto delete_cdev;
-	}
-
-	if(!(piplate_spi_dev = device_create(piplate_spi_class, NULL, piplate_spi_num, NULL, "%s", DEV_NAME))){
-		printk(KERN_INFO "Error while creating device\n");
-		error = -ENOMEM;
-		goto destroy_class;
-	}
-
-	if((registered = spi_register_driver(&piplate_driver))){
-		printk(KERN_INFO "Error while registering driver\n");
-		error = -ENOMEM;
-		goto destroy_dev;
-	}
-
-	printk(KERN_INFO "Sucessfully loaded module");
+	if(debug_level == DEBUG_LEVEL_ALL)
+		printk(KERN_INFO "Sucessfully loaded module");
 
 	return 0;
 
+	unregister_spi:
+		spi_unregister_driver(&piplate_driver);
 	destroy_dev:
 		device_destroy(piplate_spi_class, piplate_spi_num);
 	destroy_class:
 		class_destroy(piplate_spi_class);
-	delete_cdev:
-		cdev_del(piplate_spi_cdev);
 	unregister_chrdev:
 		unregister_chrdev_region(piplate_spi_num, 1);
 	free_mem:
@@ -338,17 +455,26 @@ static int __init piplate_spi_init(void){
 }
 
 static void __exit piplate_spi_exit(void){
-	printk(KERN_INFO "Unloading module...");
+	if(debug_level == DEBUG_LEVEL_ALL)
+		printk(KERN_INFO "Unloading module...");
+
+	cdev_del(piplate_spi_cdev);
 	spi_unregister_driver(&piplate_driver);
 	device_destroy(piplate_spi_class, piplate_spi_num);
 	class_destroy(piplate_spi_class);
-	cdev_del(piplate_spi_cdev);
 	unregister_chrdev_region(piplate_spi_num, 1);
 	kfree(piplate_spi);
 	gpio_free(ACK);
 	gpio_free(FRAME);
-	printk(KERN_INFO "Sucessfully unloaded module");
+
+	if(debug_level == DEBUG_LEVEL_ALL)
+		printk(KERN_INFO "Sucessfully unloaded module");
 }
 
 module_init(piplate_spi_init);
 module_exit(piplate_spi_exit);
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Tyler Stowell");
+MODULE_DESCRIPTION("Module to control Pi Plates with SPI protocol");
+MODULE_SUPPORTED_DEVICE(DEV_NAME);
