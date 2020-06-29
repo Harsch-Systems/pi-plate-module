@@ -10,18 +10,18 @@ TINKERplate, THERMOplate, RELAYplate, or
 MOTORplate attached to the raspberry pi.
 To use the driver, send the ioctl command
 "PIPLATE_SENDCMD" with the message struct as
-an input.
+an input:
 
-struct message {
-	unsigned char addr;
-	unsigned char cmd;
-	unsigned char p1;
-	unsigned char p2;
-	unsigned char rxBuf[BUF_SIZE];
-	int bytesToReturn;
-	bool useACK;
-	bool state;
-}
+struct message {  
+	unsigned char addr;  
+	unsigned char cmd;  
+	unsigned char p1;  
+	unsigned char p2;  
+	unsigned char rxBuf[BUF_SIZE];  
+	int bytesToReturn;  
+	bool useACK;  
+	bool state;  
+}  
 
 The plates are designed in one of
 two ways: The DAQC2plate, TINKERplate, and
