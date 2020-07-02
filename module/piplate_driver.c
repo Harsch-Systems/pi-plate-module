@@ -7,6 +7,7 @@
 #include <linux/delay.h>
 #include <linux/sched.h>
 #include <linux/moduleparam.h>
+#include <linux/timekeeping.h>
 
 #include "piplate.h"
 
@@ -41,7 +42,6 @@ static dev_t piplate_spi_num;
 static struct cdev *piplate_spi_cdev;
 static struct class *piplate_spi_class;
 static struct device *piplate_spi_dev;
-
 
 static const struct of_device_id piplate_dt_ids[] = {
 	{ .compatible = "piplate" }, //This name must be the same as whatever is in the device tree
@@ -179,8 +179,15 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 	}else if(m->bytesToReturn == -1){//Just keep receiving bytes until passing 25 or receiving 0. (getID)
 		int count = 0;
 		int sum = 0;
+		ktime_t start, stop;
+		transfer.delay_usecs = 20;
 		while (count < 25){
+			start = ktime_get();
 			status = spi_sync(dev->spi, &msg);
+			stop = ktime_get();
+			unsigned long delta = (stop - start);
+			if(delta > 5000000)
+				printk(KERN_INFO "Time: %lu us\n", delta);
 			if(status)
 				goto end;
 			if(dev->rx_buf[0] != 0){
