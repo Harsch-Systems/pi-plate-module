@@ -13,10 +13,10 @@ int main() {
 	}
 
 	struct message m = BASE_MESSAGE;
-	m.addr = 24;
+	m.addr = 43;
 	m.cmd = 0x00;
 	m.bytesToReturn = 1;
-	m.useACK = 0;
+	m.useACK = 1;
 
 	printf("Return: %d\n", ioctl(fileno(fp), PIPLATE_SENDCMD, &m));
 	printf("Result: %d\n", m.rBuf[0]);
