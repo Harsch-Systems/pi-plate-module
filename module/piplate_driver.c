@@ -183,7 +183,7 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 
 			for(count = 0; count < rx_len; count++){
 				rx_transfers[count].len = 1;
-				rx_transfers[count].delay_usecs = 10;
+				rx_transfers[count].delay_usecs = 15;
 				rx_transfers[count].rx_buf = &(dev->rx_buf[count]);
 				rx_transfers[count].speed_hz = dev->max_speed_hz;
 				rx_transfers[count].cs_change = 1;
@@ -343,11 +343,19 @@ static int piplate_remove(struct spi_device *spi){
 static long piplate_ioctl(struct file *filp, unsigned int cmd, unsigned long arg){
 	struct piplate_dev *dev = filp->private_data;
 
-	struct message *m = kmalloc(sizeof(struct message), GFP_DMA);
+	struct message *m;
 
 	int error;
 
+	if(!(m = kmalloc(sizeof(struct message), GFP_DMA))){
+		return -ENOMEM;
+	}
+
+	if(mutex_lock_interruptible(&dev->lock))
+		return -EINTR;
+
 	if(copy_from_user(m, (void *)arg, sizeof(struct message))){
+		mutex_unlock(&dev->lock);
 		if(debug_level >= DEBUG_LEVEL_ERR)
 			printk(KERN_ERR "Could not copy input from user space, possible invalid pointer\n");
 		return -ENOMEM;
@@ -355,9 +363,6 @@ static long piplate_ioctl(struct file *filp, unsigned int cmd, unsigned long arg
 
 	switch(cmd){
 		case PIPLATE_SENDCMD:
-			if(mutex_lock_interruptible(&dev->lock))
-				return -EINTR;
-
 			if((error = piplate_spi_message(dev, m))){
 				if(debug_level >= DEBUG_LEVEL_ERR)
 					printk(KERN_ERR "Failed to send message\n");
@@ -365,9 +370,9 @@ static long piplate_ioctl(struct file *filp, unsigned int cmd, unsigned long arg
 				return error;
 			}
 
-			mutex_unlock(&dev->lock);
 			break;
 		default:
+			mutex_unlock(&dev->lock);
 			if(debug_level >= DEBUG_LEVEL_ERR)
 				printk(KERN_ERR "Invalid command\n");
 			return -EINVAL;
@@ -377,10 +382,13 @@ static long piplate_ioctl(struct file *filp, unsigned int cmd, unsigned long arg
 	m->state = 1;
 
 	if(copy_to_user((void *)arg, m, sizeof(struct message))){
+		mutex_unlock(&dev->lock);
 		if(debug_level >= DEBUG_LEVEL_ERR)
 			printk(KERN_ERR "Failed to copy message results back to user space\n");
 		return -ENOMEM;
 	}
+
+	mutex_unlock(&dev->lock);
 
 	return 0;
 }
