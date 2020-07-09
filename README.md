@@ -44,7 +44,9 @@ dtc -@ -I dts -O dtb -o piplate.dtbo piplate_overlay.dts
 Then move the piplate.dtbo file into /boot/overlays  
 sudo mv piplate.dtbo /boot/overlays/piplate.dtbo  
 
-Finally, tell the kernel to use the device tree binary by adding dtoverlay=piplate to the end of /boot/config.txt and restart the pi.
+Finally, tell the kernel to use the device tree binary by adding dtoverlay=piplate to the end of /boot/config.txt,
+and enable SPI by uncommenting out dtparam=spi=on in the same /boot/config.txt file. Then reboot for changes to
+take effect.
 
 Inserting the module
 --------------------
