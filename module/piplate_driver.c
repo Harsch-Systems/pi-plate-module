@@ -175,25 +175,44 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 			spi_message_init(&rx_msg);
 
 			rx_transfer.len = 1;
-			rx_transfer.delay_usecs = 10;
+			rx_transfer.delay_usecs = 1;
 			rx_transfer.rx_buf = &dev->rx_buf;
 			rx_transfer.speed_hz = dev->max_speed_hz;
 
 			spi_message_add_tail(&rx_transfer, &rx_msg);
 
-			while(count < 25){
-				status = spi_sync(dev->spi, &rx_msg);
-				if(status)
-					goto end;
+			if(m->bytesToReturn > 0){
+				while(count < m->bytesToReturn){
+					status = spi_sync(dev->spi, &rx_msg);
+					if(status)
+						goto end;
 
-				if(dev->rx_buf[0] != '\0'){
 					m->rBuf[count] = dev->rx_buf[0];
-					count ++;
-				}else{
-					m->rBuf[count + 1] = '\0';
-					count = 25;
+					count++;
+					udelay(75);
 				}
-				udelay(75);
+			}else{
+				while(count < 25){
+					status = spi_sync(dev->spi, &rx_msg);
+					if(status)
+						goto end;
+
+					if(dev->rx_buf[0] >= 0x7F){
+						gpio_set_value(FRAME, 0);
+						attempts--;
+						udelay(100);
+						goto start;
+					}
+
+					if(dev->rx_buf[0] != '\0'){
+						m->rBuf[count] = dev->rx_buf[0];
+						count ++;
+					}else{
+						m->rBuf[count + 1] = '\0';
+						count = 25;
+					}
+					udelay(75);
+				}
 			}
 
 /*
