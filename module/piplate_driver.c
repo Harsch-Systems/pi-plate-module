@@ -13,8 +13,14 @@
 #define FRAME 25
 #define ACK 23
 
-#define TIME_MAX 1000000
+//If a transfer ends up sleeping when holding chip select and exceeds this time, it needs to retry. (nanoseconds)
+#define TIME_MAX 1300000
+
+//Maximum string length returned by getID().
 #define MAX_ID_LEN 25
+
+//The amount of time it takes the plates to reset in microseconds.
+#define PLATE_CHILL 80
 
 /*
   Defines the debug level. Three options available:
@@ -84,15 +90,22 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 	int status;
 	unsigned long j0;
 	ktime_t t0;
-	int attempts = MAX_ATTEMPTS;
+	int attempts = MAX_ATTEMPTS + 1;
 
 	//To allow it to retry if the transfer fails.
 	start:
-		if(attempts <= 0){
-			if(debug_level >= DEBUG_LEVEL_ERR)
-				printk(KERN_ERR "Ran out of attempts due to multiple timing failures\n");
-			return -EIO;
+		if(attempts < MAX_ATTEMPTS){
+			printk(KERN_INFO "Restaring...\n");
+			gpio_set_value(FRAME, 0);
+			udelay(PLATE_CHILL);
+			if(attempts <= 0){
+				printk(KERN_INFO "Done.\n");
+				if(debug_level >= DEBUG_LEVEL_ERR)
+					printk(KERN_ERR "Ran out of attempts due to multiple timing failures\n");
+				return -EIO;
+			}
 		}
+		attempts--;
 
 	dev->tx_buf[0] = m->addr;
 	dev->tx_buf[1] = m->cmd;
@@ -135,13 +148,8 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 
 	status = spi_sync(dev->spi, &tx_msg);
 
-	if((t0 = ktime_get() - t0) > TIME_MAX){//If this process slept for a long time during spi_sync, it needs to restart.
-		printk(KERN_INFO "Retrying after delay of %llu\n", t0);
-		gpio_set_value(FRAME, 0);
-		attempts--;
-		udelay(100);//Give piplate time to restart
+	if(ktime_get() - t0 > TIME_MAX)//If this process slept for a long time during spi_sync, it needs to restart.
 		goto start;
-	}
 
 	if(status){
 		if(debug_level >= DEBUG_LEVEL_ERR)
@@ -164,7 +172,7 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 				}
 			}
 		}else{
-			udelay(70);
+			udelay(85);
 		}
 
 		if(!m->useACK){
@@ -183,25 +191,21 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 			spi_message_add_tail(&rx_transfer, &rx_msg);
 
 			if(m->bytesToReturn > 0){
-				while(count < m->bytesToReturn){
+				for(count = 0; count < m->bytesToReturn; count++){
 					status = spi_sync(dev->spi, &rx_msg);
 					if(status)
 						goto end;
 
 					/*
-					* If an error has occured and the plate can't give a response, normally the byte
-					* 0xFF shows up. Restarting based of this can greatly improve accuracy, but it
-					* is important to note that this could be correct. So, we only restart once.
+					* If an error has occured and the plate can't give a response, the MISO bus
+					* will stay high and register 0xFF. Restarting based of this can greatly improve
+					* accuracy, but it is important to note that there are a handful of functions that
+					* might return this normally. So, we only restart if we haven't before.
 					*/
-					if((dev->rx_buf[0] & 0xFF) == 0xFF && attempts == MAX_ATTEMPTS){
-						gpio_set_value(FRAME, 0);
-						attempts--;
-						udelay(100);
+					if((dev->rx_buf[0] & 0xFF) == 0xFF && attempts == MAX_ATTEMPTS)
 						goto start;
-					}
 
 					m->rBuf[count] = dev->rx_buf[0];
-					count++;
 					udelay(75);
 				}
 			}else{
@@ -210,12 +214,8 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 					if(status)
 						goto end;
 
-					if(dev->rx_buf[0] >= 0x7F){
-						gpio_set_value(FRAME, 0);
-						attempts--;
-						udelay(100);
+					if(dev->rx_buf[0] >= 0x7F)//It didn't receive a valid ASCII character
 						goto start;
-					}
 
 					if(dev->rx_buf[0] != '\0'){
 						m->rBuf[count] = dev->rx_buf[0];
@@ -224,63 +224,9 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 						m->rBuf[count + 1] = '\0';
 						count = 25;
 					}
-					udelay(85);
+					udelay(75);
 				}
 			}
-
-/*
-			struct spi_message rx_msg = { };
-			struct spi_transfer *rx_transfers;
-
-			int rx_len = ((m->bytesToReturn >= 0) ? m->bytesToReturn : MAX_ID_LEN);
-
-			rx_transfers = kzalloc(rx_len * sizeof(struct spi_transfer), GFP_KERNEL);
-
-			if(!rx_transfers)
-				return -ENOMEM;
-
-			spi_message_init(&rx_msg);
-
-			for(count = 0; count < rx_len; count++){
-				rx_transfers[count].len = 1;
-				rx_transfers[count].delay_usecs = 40;
-				rx_transfers[count].rx_buf = &(dev->rx_buf[count]);
-				rx_transfers[count].speed_hz = dev->max_speed_hz;
-				rx_transfers[count].cs_change = 1;
-				spi_message_add_tail(&(rx_transfers[count]), &rx_msg);
-			}
-
-			status = spi_sync(dev->spi, &rx_msg);
-
-			if(status){
-				if(debug_level >= DEBUG_LEVEL_ERR)
-					printk(KERN_ERR "Unknown error while receiving SPI data\n");
-				kfree(rx_transfers);
-				goto end;
-			}
-
-			if(m->bytesToReturn > 0){
-				for(count = 0; count < rx_len; count++){
-					unsigned char val = dev->rx_buf[count];
-
-					m->rBuf[count] = val;
-				}
-			}else{
-				for(count = 0; count < rx_len; count++){
-					//Variable Bytes to Return
-					unsigned char val = dev->rx_buf[count];
-
-					if(val){
-						m->rBuf[count] = val;
-					}else{
-						m->rBuf[count] = '\0';
-						count = rx_len;
-					}
-				}
-			}
-
-			kfree(rx_transfers);
-*/
 		}else{
 			int sum = 0;
 			int verifier = 0;
@@ -355,6 +301,8 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 	}
 
 	gpio_set_value(FRAME, 0);
+
+	udelay(PLATE_CHILL);
 
 	if(debug_level == DEBUG_LEVEL_ALL)
 		printk(KERN_DEBUG "Message sent successfully\n");
