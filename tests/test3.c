@@ -15,14 +15,14 @@ int main() {
 
 	int successes = 0;
 
-	unsigned char address = 9;
+	unsigned char address = 24;
 	bool ack = 0;
 
 	struct message m = BASE_MESSAGE;
 	m.addr = address;//24 = relay, 9 = DAQC, 19 = MOTOR, 43 = thermo, 36 = DAQC2, 53 = TINKER
-	m.cmd = 0x01;
+	m.cmd = 0x00;
 	m.p1 = 1;
-	m.bytesToReturn = -1;
+	m.bytesToReturn = 1;
 	m.useACK = ack;
 
 	struct message m2 = BASE_MESSAGE;
@@ -33,8 +33,11 @@ int main() {
 
 	while(1){
 		ioctl(fileno(fp), PIPLATE_SENDCMD, &m);
-		printf("Result: %s\n", m.rBuf);
-		if(strcmp("Pi-Plate DAQC", m.rBuf))//Pi-Plate RELAY, Pi-Plate THERMOplate, Pi-Plate DAQC2plate
+		printf("Result: %d\n", m.rBuf[0]);
+//		if(strcmp("Pi-Plate DAQC", m.rBuf))//Pi-Plate RELAY, Pi-Plate THERMOplate, Pi-Plate DAQC2plate
+//			break;
+
+		if(m.rBuf[0] != address)
 			break;
 
 		successes++;

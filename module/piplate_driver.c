@@ -13,7 +13,7 @@
 #define FRAME 25
 #define ACK 23
 
-#define TIME_MAX 1500000
+#define TIME_MAX 1000000
 #define MAX_ID_LEN 25
 
 /*
@@ -135,7 +135,8 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 
 	status = spi_sync(dev->spi, &tx_msg);
 
-	if((ktime_get() - t0) > TIME_MAX){//If this process slept for a long time during spi_sync, it needs to restart.
+	if((t0 = ktime_get() - t0) > TIME_MAX){//If this process slept for a long time during spi_sync, it needs to restart.
+		printk(KERN_INFO "Retrying after delay of %llu\n", t0);
 		gpio_set_value(FRAME, 0);
 		attempts--;
 		udelay(100);//Give piplate time to restart
@@ -175,7 +176,7 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 			spi_message_init(&rx_msg);
 
 			rx_transfer.len = 1;
-			rx_transfer.delay_usecs = 1;
+			rx_transfer.delay_usecs = 3;
 			rx_transfer.rx_buf = &dev->rx_buf;
 			rx_transfer.speed_hz = dev->max_speed_hz;
 
@@ -186,6 +187,18 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 					status = spi_sync(dev->spi, &rx_msg);
 					if(status)
 						goto end;
+
+					/*
+					* If an error has occured and the plate can't give a response, normally the byte
+					* 0xFF shows up. Restarting based of this can greatly improve accuracy, but it
+					* is important to note that this could be correct. So, we only restart once.
+					*/
+					if((dev->rx_buf[0] & 0xFF) == 0xFF && attempts == MAX_ATTEMPTS){
+						gpio_set_value(FRAME, 0);
+						attempts--;
+						udelay(100);
+						goto start;
+					}
 
 					m->rBuf[count] = dev->rx_buf[0];
 					count++;
@@ -211,7 +224,7 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 						m->rBuf[count + 1] = '\0';
 						count = 25;
 					}
-					udelay(75);
+					udelay(85);
 				}
 			}
 
