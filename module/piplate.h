@@ -6,7 +6,7 @@
 
 #define BUF_SIZE 128
 #define DEV_NAME "PiPlates"
-#define MAX_SPEED_HZ 500000
+#define MAX_SPEED_HZ 400000
 #define MAX_ATTEMPTS 10
 
 //Ioctl Definitions:

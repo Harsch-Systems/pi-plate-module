@@ -102,7 +102,7 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 	tx_transfer.tx_buf = &dev->tx_buf;
 	tx_transfer.len = 4;
 	tx_transfer.speed_hz = dev->max_speed_hz;
-	tx_transfer.delay_usecs = 10;
+	tx_transfer.delay_usecs = 40;
 
 	spi_message_init(&tx_msg);
 	spi_message_add_tail(&tx_transfer, &tx_msg);
@@ -138,7 +138,7 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 	if((ktime_get() - t0) > TIME_MAX){//If this process slept for a long time during spi_sync, it needs to restart.
 		gpio_set_value(FRAME, 0);
 		attempts--;
-		udelay(200);//Give piplate time to restart
+		udelay(100);//Give piplate time to restart
 		goto start;
 	}
 
@@ -163,12 +163,40 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 				}
 			}
 		}else{
-			udelay(100);
+			udelay(70);
 		}
 
 		if(!m->useACK){
 			//Creates the receiving transfers. Each byte is a transfer in one message because that allows it to be atomic.
 			//m->useACK case is done differently because this method is more accurate, but doesn't work for them.
+			struct spi_message rx_msg = { };
+			struct spi_transfer rx_transfer = { };
+
+			spi_message_init(&rx_msg);
+
+			rx_transfer.len = 1;
+			rx_transfer.delay_usecs = 10;
+			rx_transfer.rx_buf = &dev->rx_buf;
+			rx_transfer.speed_hz = dev->max_speed_hz;
+
+			spi_message_add_tail(&rx_transfer, &rx_msg);
+
+			while(count < 25){
+				status = spi_sync(dev->spi, &rx_msg);
+				if(status)
+					goto end;
+
+				if(dev->rx_buf[0] != '\0'){
+					m->rBuf[count] = dev->rx_buf[0];
+					count ++;
+				}else{
+					m->rBuf[count + 1] = '\0';
+					count = 25;
+				}
+				udelay(75);
+			}
+
+/*
 			struct spi_message rx_msg = { };
 			struct spi_transfer *rx_transfers;
 
@@ -183,7 +211,7 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 
 			for(count = 0; count < rx_len; count++){
 				rx_transfers[count].len = 1;
-				rx_transfers[count].delay_usecs = 15;
+				rx_transfers[count].delay_usecs = 40;
 				rx_transfers[count].rx_buf = &(dev->rx_buf[count]);
 				rx_transfers[count].speed_hz = dev->max_speed_hz;
 				rx_transfers[count].cs_change = 1;
@@ -220,7 +248,7 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 			}
 
 			kfree(rx_transfers);
-
+*/
 		}else{
 			int sum = 0;
 			int verifier = 0;
