@@ -20,7 +20,7 @@
 #define MAX_ID_LEN 25
 
 //The amount of time it takes the plates to reset in microseconds.
-#define PLATE_CHILL 80
+#define PLATE_CHILL 40
 
 /*
   Defines the debug level. Three options available:
@@ -184,7 +184,7 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 			spi_message_init(&rx_msg);
 
 			rx_transfer.len = 1;
-			rx_transfer.delay_usecs = 3;
+			rx_transfer.delay_usecs = 1;
 			rx_transfer.rx_buf = &dev->rx_buf;
 			rx_transfer.speed_hz = dev->max_speed_hz;
 
@@ -202,8 +202,10 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 					* accuracy, but it is important to note that there are a handful of functions that
 					* might return this normally. So, we only restart if we haven't before.
 					*/
-					if((dev->rx_buf[0] & 0xFF) == 0xFF && attempts == MAX_ATTEMPTS)
+					if((dev->rx_buf[0] & 0xFF) == 0xFF && attempts == MAX_ATTEMPTS){
+						printk(KERN_INFO "Double F\n");
 						goto start;
+					}
 
 					m->rBuf[count] = dev->rx_buf[0];
 					udelay(75);
@@ -214,14 +216,14 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 					if(status)
 						goto end;
 
-					if(dev->rx_buf[0] >= 0x7F)//It didn't receive a valid ASCII character
+					if(dev->rx_buf[0] >= 0x7F || (dev->rx_buf[0] <= 0x1F && dev->rx_buf[0] >= 0x01))//It didn't receive a valid ASCII character
 						goto start;
 
 					if(dev->rx_buf[0] != '\0'){
 						m->rBuf[count] = dev->rx_buf[0];
 						count ++;
 					}else{
-						m->rBuf[count + 1] = '\0';
+						m->rBuf[count] = '\0';
 						count = 25;
 					}
 					udelay(75);
@@ -359,13 +361,16 @@ static long piplate_ioctl(struct file *filp, unsigned int cmd, unsigned long arg
 		return -ENOMEM;
 	}
 
-	if(mutex_lock_interruptible(&dev->lock))
+	if(mutex_lock_interruptible(&dev->lock)){
+		kfree(m);
 		return -EINTR;
+	}
 
 	if(copy_from_user(m, (void *)arg, sizeof(struct message))){
 		mutex_unlock(&dev->lock);
 		if(debug_level >= DEBUG_LEVEL_ERR)
 			printk(KERN_ERR "Could not copy input from user space, possible invalid pointer\n");
+		kfree(m);
 		return -ENOMEM;
 	}
 
@@ -374,6 +379,7 @@ static long piplate_ioctl(struct file *filp, unsigned int cmd, unsigned long arg
 			if((error = piplate_spi_message(dev, m))){
 				if(debug_level >= DEBUG_LEVEL_ERR)
 					printk(KERN_ERR "Failed to send message\n");
+				kfree(m);
 				mutex_unlock(&dev->lock);
 				return error;
 			}
@@ -383,6 +389,7 @@ static long piplate_ioctl(struct file *filp, unsigned int cmd, unsigned long arg
 			mutex_unlock(&dev->lock);
 			if(debug_level >= DEBUG_LEVEL_ERR)
 				printk(KERN_ERR "Invalid command\n");
+			kfree(m);
 			return -EINVAL;
 			break;
 	}
@@ -391,10 +398,13 @@ static long piplate_ioctl(struct file *filp, unsigned int cmd, unsigned long arg
 
 	if(copy_to_user((void *)arg, m, sizeof(struct message))){
 		mutex_unlock(&dev->lock);
+		kfree(m);
 		if(debug_level >= DEBUG_LEVEL_ERR)
 			printk(KERN_ERR "Failed to copy message results back to user space\n");
 		return -ENOMEM;
 	}
+
+	kfree(m);
 
 	mutex_unlock(&dev->lock);
 
