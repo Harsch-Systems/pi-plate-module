@@ -20,7 +20,7 @@
 #define MAX_ID_LEN 25
 
 //The amount of time it takes the plates to reset in microseconds.
-#define PLATE_CHILL 40
+#define PLATE_CHILL 100
 
 /*
   Defines the debug level. Three options available:
@@ -94,12 +94,11 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 
 	//To allow it to retry if the transfer fails.
 	start:
-		if(attempts < MAX_ATTEMPTS){
-			printk(KERN_INFO "Restaring...\n");
+		if(attempts <= MAX_ATTEMPTS){
+			printk(KERN_INFO "Restarting...\n");
 			gpio_set_value(FRAME, 0);
 			udelay(PLATE_CHILL);
 			if(attempts <= 0){
-				printk(KERN_INFO "Done.\n");
 				if(debug_level >= DEBUG_LEVEL_ERR)
 					printk(KERN_ERR "Ran out of attempts due to multiple timing failures\n");
 				return -EIO;
@@ -172,7 +171,7 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 				}
 			}
 		}else{
-			udelay(85);
+			udelay(30);
 		}
 
 		if(!m->useACK){
@@ -203,7 +202,6 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 					* might return this normally. So, we only restart if we haven't before.
 					*/
 					if((dev->rx_buf[0] & 0xFF) == 0xFF && attempts == MAX_ATTEMPTS){
-						printk(KERN_INFO "Double F\n");
 						goto start;
 					}
 
