@@ -45,7 +45,7 @@ struct piplate_dev {
 	struct mutex lock;
 };
 
-struct piplate_dev *piplate_spi = NULL;
+struct piplate_dev *piplate_spi;
 static dev_t piplate_spi_num;
 static struct cdev *piplate_spi_cdev;
 static struct class *piplate_spi_class;
@@ -91,6 +91,9 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 	unsigned long j0;
 	ktime_t t0;
 	int attempts = MAX_ATTEMPTS + 1;
+
+//	printk(KERN_INFO "speed: %d\n", dev->spi->master->max_speed_hz);
+//	printk(KERN_INFO "speed: %d\n", dev->max_speed_hz);
 
 	//To allow it to retry if the transfer fails.
 	start:
@@ -316,6 +319,8 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 }
 
 static int piplate_probe(struct spi_device *spi){
+	printk(KERN_INFO "Spi speed: %d\n", spi->max_speed_hz);
+
 	if(debug_level == DEBUG_LEVEL_ALL)
 		printk(KERN_DEBUG "Probing SPI device\n");
 
@@ -332,16 +337,10 @@ static int piplate_probe(struct spi_device *spi){
 	piplate_spi->spi = spi;
 	piplate_spi->max_speed_hz = MAX_SPEED_HZ;
 
-	spi_set_drvdata(spi, piplate_spi);
-
 	return 0;
 }
 
 static int piplate_remove(struct spi_device *spi){
-	struct piplate_dev *dev = spi_get_drvdata(spi);
-
-	kfree(dev);
-
 	if(debug_level == DEBUG_LEVEL_ALL)
 		printk(KERN_DEBUG "SPI device removed\n");
 
