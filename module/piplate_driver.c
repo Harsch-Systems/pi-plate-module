@@ -98,7 +98,6 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 	//To allow it to retry if the transfer fails.
 	start:
 		if(attempts <= MAX_ATTEMPTS){
-			printk(KERN_INFO "Restarting...\n");
 			gpio_set_value(FRAME, 0);
 			udelay(PLATE_CHILL);
 			if(attempts <= 0){
@@ -319,8 +318,6 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 }
 
 static int piplate_probe(struct spi_device *spi){
-	printk(KERN_INFO "Spi speed: %d\n", spi->max_speed_hz);
-
 	if(debug_level == DEBUG_LEVEL_ALL)
 		printk(KERN_DEBUG "Probing SPI device\n");
 
