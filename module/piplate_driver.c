@@ -12,6 +12,7 @@
 
 #define FRAME 25
 #define ACK 23
+#define INT 22
 
 //If a transfer ends up sleeping when holding chip select and exceeds this time, it needs to retry. (nanoseconds)
 #define TIME_MAX 1300000
@@ -347,29 +348,29 @@ static int piplate_remove(struct spi_device *spi){
 static long piplate_ioctl(struct file *filp, unsigned int cmd, unsigned long arg){
 	struct piplate_dev *dev = filp->private_data;
 
-	struct message *m;
-
 	int error;
 
-	if(!(m = kmalloc(sizeof(struct message), GFP_DMA))){
-		return -ENOMEM;
-	}
-
-	if(mutex_lock_interruptible(&dev->lock)){
-		kfree(m);
-		return -EINTR;
-	}
-
-	if(copy_from_user(m, (void *)arg, sizeof(struct message))){
-		mutex_unlock(&dev->lock);
-		if(debug_level >= DEBUG_LEVEL_ERR)
-			printk(KERN_ERR "Could not copy input from user space, possible invalid pointer\n");
-		kfree(m);
-		return -ENOMEM;
-	}
+	struct message *m;
 
 	switch(cmd){
 		case PIPLATE_SENDCMD:
+			if(!(m = kmalloc(sizeof(struct message), GFP_DMA))){
+				return -ENOMEM;
+			}
+
+			if(mutex_lock_interruptible(&dev->lock)){
+				kfree(m);
+				return -EINTR;
+			}
+
+			if(copy_from_user(m, (void *)arg, sizeof(struct message))){
+				mutex_unlock(&dev->lock);
+				if(debug_level >= DEBUG_LEVEL_ERR)
+					printk(KERN_ERR "Could not copy input from user space, possible invalid pointer\n");
+				kfree(m);
+				return -ENOMEM;
+			}
+
 			if((error = piplate_spi_message(dev, m))){
 				if(debug_level >= DEBUG_LEVEL_ERR)
 					printk(KERN_ERR "Failed to send message\n");
@@ -377,30 +378,32 @@ static long piplate_ioctl(struct file *filp, unsigned int cmd, unsigned long arg
 				mutex_unlock(&dev->lock);
 				return error;
 			}
+			m->state = 1;
+
+			if(copy_to_user((void *)arg, m, sizeof(struct message))){
+				mutex_unlock(&dev->lock);
+				kfree(m);
+				if(debug_level >= DEBUG_LEVEL_ERR)
+					printk(KERN_ERR "Failed to copy message results back to user space\n");
+				return -ENOMEM;
+			}
+
+			kfree(m);
+
+			mutex_unlock(&dev->lock);
 
 			break;
+
+		case PIPLATE_GETINT:
+			return gpio_get_value(INT);
+			break;
+
 		default:
-			mutex_unlock(&dev->lock);
 			if(debug_level >= DEBUG_LEVEL_ERR)
 				printk(KERN_ERR "Invalid command\n");
-			kfree(m);
 			return -EINVAL;
 			break;
 	}
-
-	m->state = 1;
-
-	if(copy_to_user((void *)arg, m, sizeof(struct message))){
-		mutex_unlock(&dev->lock);
-		kfree(m);
-		if(debug_level >= DEBUG_LEVEL_ERR)
-			printk(KERN_ERR "Failed to copy message results back to user space\n");
-		return -ENOMEM;
-	}
-
-	kfree(m);
-
-	mutex_unlock(&dev->lock);
 
 	return 0;
 }
@@ -440,18 +443,24 @@ static int __init piplate_spi_init(void){
 		goto free_frame;
 	}
 
-	if(gpio_direction_input(ACK) || gpio_direction_output(FRAME, 0)){
+	if((error = gpio_request(INT, "INT"))){
+		if(debug_level >= DEBUG_LEVEL_ERR)
+			printk(KERN_ERR "Failiure to request ACK pin\n");
+		goto free_ack;
+	}
+
+	if(gpio_direction_input(ACK) || gpio_direction_output(FRAME, 0) || gpio_direction_input(INT)){
 		if(debug_level >= DEBUG_LEVEL_ERR)
 			printk(KERN_ERR "Can't set input/output mode for pins\n");
 		error = -EPERM;
-		goto free_ack;
+		goto free_int;
 	}
 
 	if(!(piplate_spi = kzalloc(sizeof(*piplate_spi), GFP_KERNEL))){
 		if(debug_level >= DEBUG_LEVEL_ERR)
 			printk(KERN_ERR "Can't allocate memory for spi device");
 		error = -ENOMEM;
-		goto free_ack;
+		goto free_int;
 	}
 
 	mutex_init(&piplate_spi->lock);
@@ -513,6 +522,8 @@ static int __init piplate_spi_init(void){
 		unregister_chrdev_region(piplate_spi_num, 1);
 	free_mem:
 		kfree(piplate_spi);
+	free_int:
+		gpio_free(INT);
 	free_ack:
 		gpio_free(ACK);
 	free_frame:
@@ -531,6 +542,7 @@ static void __exit piplate_spi_exit(void){
 	class_destroy(piplate_spi_class);
 	unregister_chrdev_region(piplate_spi_num, 1);
 	kfree(piplate_spi);
+	gpio_free(INT);
 	gpio_free(ACK);
 	gpio_free(FRAME);
 

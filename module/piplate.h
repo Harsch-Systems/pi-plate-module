@@ -13,6 +13,7 @@
 #define PIPLATE_IOC_MAG 'Q'
 
 #define PIPLATE_SENDCMD _IOWR(PIPLATE_IOC_MAG, 0, int)
+#define PIPLATE_GETINT _IO(PIPLATE_IOC_MAG, 1)
 
 struct message {
 	unsigned char addr;
