@@ -129,6 +129,7 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 			printk(KERN_DEBUG "Sending command to Pi Plate without ACK wire (DAQCplate, RELAYplate, MOTORplate)\n");
 		printk(KERN_DEBUG "Address: %d\n", m->addr);
 		printk(KERN_DEBUG "Command number: %d\n", m->cmd);
+		printk(KERN_DEBUG "Bytes to return: %d\n", m->bytesToReturn);
 	}
 
 	//Confirm ACK bit is high before transfer begins
