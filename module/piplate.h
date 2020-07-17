@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <linux/ioctl.h>
 
-#define BUF_SIZE 128
+#define BUF_SIZE 4096
 #define DEV_NAME "PiPlates"
 #define MAX_SPEED_HZ 400000
 #define MAX_ATTEMPTS 10

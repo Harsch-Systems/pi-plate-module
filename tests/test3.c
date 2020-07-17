@@ -15,14 +15,14 @@ int main() {
 
 	int successes = 0;
 
-	unsigned char address = 9;
-	bool ack = 0;
+	unsigned char address = 43;
+	bool ack = 1;
 
 	struct message m = BASE_MESSAGE;
 	m.addr = address;//24 = relay, 9 = DAQC, 19 = MOTOR, 43 = thermo, 36 = DAQC2, 53 = TINKER
-	m.cmd = 0x30;
-	m.p1 = 1;
-	m.bytesToReturn = 2;
+	m.cmd = 0x00;
+	m.p1 = 0;
+	m.bytesToReturn = 1;
 	m.useACK = ack;
 
 	struct message m2 = BASE_MESSAGE;
