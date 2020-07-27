@@ -332,7 +332,6 @@ static int piplate_probe(struct spi_device *spi){
 		return -ENOMEM;
 	}
 
-	spi->mode = 0x00;//Or 0x04, if on linux 4.19 or earlier.
 	piplate_spi->spi = spi;
 	piplate_spi->max_speed_hz = MAX_SPEED_HZ;
 
