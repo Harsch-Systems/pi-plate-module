@@ -83,7 +83,6 @@ static int piplate_release(struct inode *inode, struct file *filp){
 	return 0;
 }
 
-
 /*
   Sends a message to the pi plate given the information in message m.
   m has already been copied from user space in ioctl, so this does
@@ -124,7 +123,7 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 	tx_transfer.tx_buf = &dev->tx_buf;
 	tx_transfer.len = 4;
 	tx_transfer.speed_hz = dev->max_speed_hz;
-	tx_transfer.delay_usecs = 40;
+	tx_transfer.delay_usecs = 20;
 
 	spi_message_init(&tx_msg);
 	spi_message_add_tail(&tx_transfer, &tx_msg);
@@ -157,7 +156,7 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 	if(m->bytesToReturn){
 		int count = 0;
 
-		//Handles different delay systems. Either way, delay for 30 us.
+		//Handles different delay systems.
 		if(m->useACK){
 			j0 = jiffies;
 			while(gpiod_get_value(dev->ack_pin)){
@@ -165,11 +164,12 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 					if(debug_level >= DEBUG_LEVEL_ERR)
 						printk(KERN_ERR "Timed out while waiting for ACK bit low\n");
 					status = -EIO;
-					goto end;
+					goto start;
 				}
 			}
+		}else{
+			udelay(30);
 		}
-		udelay(30);
 
 		if(!m->useACK){
 			//Creates the receiving transfers. Each byte is a transfer in one message because that allows it to be atomic.
@@ -236,7 +236,7 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 			spi_message_init(&rx_msg);
 
 			rx_transfer.len = 1;
-			rx_transfer.delay_usecs = 20;
+			rx_transfer.delay_usecs = 50;
 			rx_transfer.rx_buf = &dev->rx_buf;
 			rx_transfer.speed_hz = dev->max_speed_hz;
 
@@ -271,6 +271,10 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 						sum += dev->rx_buf[0];
 						count++;
 					}else{
+						if((sum & 0xFF) == 0x00){
+							goto start;
+						}
+
 						m->rBuf[count + 1] = '\0';
 
 						status = spi_sync(dev->spi, &rx_msg);
@@ -285,14 +289,17 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 
 						count = rx_len;
 					}
+					udelay(50);
 				}
 			}
+
+			printk(KERN_INFO "Verifier: %x, Sum: %x\n", ~verifier, sum);
+			printk(KERN_INFO "Rbuf: %s\n", m->rBuf);
 
 			if((~verifier & 0xFF) != (sum & 0xFF)){
 				if(debug_level >= DEBUG_LEVEL_ERR)
 					printk(KERN_ERR "Error while receiving data: Did not match verification byte\n");
-				status = -EIO;
-				goto end;
+				goto start;
 			}
 		}
 	}
