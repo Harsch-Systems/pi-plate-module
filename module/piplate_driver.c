@@ -3,7 +3,8 @@
 #include <linux/mutex.h>
 #include <linux/cdev.h>
 #include <linux/uaccess.h>
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
+#include <linux/of.h>
 #include <linux/delay.h>
 #include <linux/sched.h>
 #include <linux/moduleparam.h>
@@ -44,6 +45,9 @@ struct piplate_dev {
 	unsigned char rx_buf[BUF_SIZE];
 	unsigned int max_speed_hz;
 	struct mutex lock;
+	struct gpio_desc *frame_pin;
+	struct gpio_desc *ack_pin;
+	struct gpio_desc *int_pin;
 };
 
 struct piplate_dev *piplate_spi;
@@ -93,13 +97,16 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 	ktime_t t0;
 	int attempts = MAX_ATTEMPTS + 1;
 
-//	printk(KERN_INFO "speed: %d\n", dev->spi->master->max_speed_hz);
-//	printk(KERN_INFO "speed: %d\n", dev->max_speed_hz);
+	if(!dev->spi){
+		if(debug_level >= DEBUG_LEVEL_ERR)
+			printk(KERN_ERR "SPI never probed - error with device tree overlay.\n");
+		return -EIO;
+	}
 
 	//To allow it to retry if the transfer fails.
 	start:
 		if(attempts <= MAX_ATTEMPTS){
-			gpio_set_value(FRAME, 0);
+			gpiod_set_value(dev->frame_pin, 0);
 			udelay(PLATE_CHILL);
 			if(attempts <= 0){
 				if(debug_level >= DEBUG_LEVEL_ERR)
@@ -132,20 +139,7 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 		printk(KERN_DEBUG "Bytes to return: %d\n", m->bytesToReturn);
 	}
 
-	//Confirm ACK bit is high before transfer begins
-	if(m->useACK){
-		j0 = jiffies;
-		while(!gpio_get_value(ACK)){
-			if(time_after(jiffies, j0 + (HZ/100))){
-				if(debug_level >= DEBUG_LEVEL_ERR)
-					printk(KERN_ERR "Timed out while confirming ACK bit high\n");
-				status = -EIO;
-				goto end;
-			}
-		}
-	}
-
-	gpio_set_value(FRAME, 1);
+	gpiod_set_value(dev->frame_pin, 1);
 
 	t0 = ktime_get();
 
@@ -163,10 +157,10 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 	if(m->bytesToReturn){
 		int count = 0;
 
-		//Handles different delay systems. If using ACK, wait for that to go low. Otherwise, delay for 100us.
+		//Handles different delay systems. Either way, delay for 30 us.
 		if(m->useACK){
 			j0 = jiffies;
-			while(gpio_get_value(ACK)){
+			while(gpiod_get_value(dev->ack_pin)){
 				if(time_after(jiffies, j0 + (HZ/100))){
 					if(debug_level >= DEBUG_LEVEL_ERR)
 						printk(KERN_ERR "Timed out while waiting for ACK bit low\n");
@@ -174,9 +168,8 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 					goto end;
 				}
 			}
-		}else{
-			udelay(30);
 		}
+		udelay(30);
 
 		if(!m->useACK){
 			//Creates the receiving transfers. Each byte is a transfer in one message because that allows it to be atomic.
@@ -304,7 +297,7 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 		}
 	}
 
-	gpio_set_value(FRAME, 0);
+	gpiod_set_value(dev->frame_pin, 0);
 
 	udelay(PLATE_CHILL);
 
@@ -315,7 +308,7 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 
 	//Goto statement that ensures the FRAME is set low if an error occurs at any point
 	end:
-		gpio_set_value(FRAME, 0);
+		gpiod_set_value(dev->frame_pin, 0);
 		return status;
 }
 
@@ -332,6 +325,7 @@ static int piplate_probe(struct spi_device *spi){
 		return -ENOMEM;
 	}
 
+	//spi->mode = 0x04;
 	piplate_spi->spi = spi;
 	piplate_spi->max_speed_hz = MAX_SPEED_HZ;
 
@@ -395,7 +389,7 @@ static long piplate_ioctl(struct file *filp, unsigned int cmd, unsigned long arg
 			break;
 
 		case PIPLATE_GETINT:
-			return gpio_get_value(INT);
+			return gpiod_get_value(dev->int_pin);
 			break;
 
 		default:
@@ -426,49 +420,49 @@ static const struct file_operations piplate_fops = {
 };
 
 static int __init piplate_spi_init(void){
-	int error;
+	int error = -EIO;
 
 	if(debug_level == DEBUG_LEVEL_ALL)
 		printk(KERN_DEBUG "Loading module...\n");
 
-	if((error = gpio_request(FRAME, "FRAME"))){
+	if(!(piplate_spi = kzalloc(sizeof(*piplate_spi), GFP_KERNEL))){
 		if(debug_level >= DEBUG_LEVEL_ERR)
-			printk(KERN_ERR "Failiure to request FRAME pin\n");
+			printk(KERN_ERR "Can't allocate memory for spi device");
+		error = -ENOMEM;
 		goto end;
 	}
 
-	if((error = gpio_request(ACK, "ACK"))){
+	mutex_init(&piplate_spi->lock);
+
+	if((piplate_spi->frame_pin = gpio_to_desc(FRAME)) < 0){
+		if(debug_level >= DEBUG_LEVEL_ERR)
+			printk(KERN_ERR "Failiure to request FRAME pin\n");
+		goto free_mem;
+	}
+
+	if((piplate_spi->ack_pin = gpio_to_desc(ACK)) < 0){
 		if(debug_level >= DEBUG_LEVEL_ERR)
 			printk(KERN_ERR "Failiure to request ACK pin\n");
 		goto free_frame;
 	}
 
-	if((error = gpio_request(INT, "INT"))){
+	if((piplate_spi->int_pin = gpio_to_desc(INT)) < 0){
 		if(debug_level >= DEBUG_LEVEL_ERR)
 			printk(KERN_ERR "Failiure to request ACK pin\n");
 		goto free_ack;
 	}
 
-	if(gpio_direction_input(ACK) || gpio_direction_output(FRAME, 0) || gpio_direction_input(INT)){
+	if(gpiod_direction_input(piplate_spi->ack_pin) || gpiod_direction_output(piplate_spi->frame_pin, 0) || gpiod_direction_input(piplate_spi->int_pin)){
 		if(debug_level >= DEBUG_LEVEL_ERR)
 			printk(KERN_ERR "Can't set input/output mode for pins\n");
 		error = -EPERM;
 		goto free_int;
 	}
 
-	if(!(piplate_spi = kzalloc(sizeof(*piplate_spi), GFP_KERNEL))){
-		if(debug_level >= DEBUG_LEVEL_ERR)
-			printk(KERN_ERR "Can't allocate memory for spi device");
-		error = -ENOMEM;
-		goto free_int;
-	}
-
-	mutex_init(&piplate_spi->lock);
-
 	if((error = alloc_chrdev_region(&piplate_spi_num, 0, 1, DEV_NAME))){
 		if(debug_level >= DEBUG_LEVEL_ERR)
 			printk(KERN_ERR "Error while allocating device number\n");
-		goto free_mem;
+		goto free_int;
 	}
 
 	if(!(piplate_spi_class = class_create(THIS_MODULE, DEV_NAME))){
@@ -520,14 +514,14 @@ static int __init piplate_spi_init(void){
 		class_destroy(piplate_spi_class);
 	unregister_chrdev:
 		unregister_chrdev_region(piplate_spi_num, 1);
+	free_int:
+		gpiod_put(piplate_spi->int_pin);
+	free_ack:
+		gpiod_put(piplate_spi->ack_pin);
+	free_frame:
+		gpiod_put(piplate_spi->frame_pin);
 	free_mem:
 		kfree(piplate_spi);
-	free_int:
-		gpio_free(INT);
-	free_ack:
-		gpio_free(ACK);
-	free_frame:
-		gpio_free(FRAME);
 	end:
 		return error;
 }
@@ -541,10 +535,10 @@ static void __exit piplate_spi_exit(void){
 	device_destroy(piplate_spi_class, piplate_spi_num);
 	class_destroy(piplate_spi_class);
 	unregister_chrdev_region(piplate_spi_num, 1);
+	gpiod_put(piplate_spi->int_pin);
+	gpiod_put(piplate_spi->ack_pin);
+	gpiod_put(piplate_spi->frame_pin);
 	kfree(piplate_spi);
-	gpio_free(INT);
-	gpio_free(ACK);
-	gpio_free(FRAME);
 
 	if(debug_level == DEBUG_LEVEL_ALL)
 		printk(KERN_INFO "Sucessfully unloaded module");
