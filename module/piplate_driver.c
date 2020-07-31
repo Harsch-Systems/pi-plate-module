@@ -57,7 +57,7 @@ static struct class *piplate_spi_class;
 static struct device *piplate_spi_dev;
 
 static const struct of_device_id piplate_dt_ids[] = {
-	{ .compatible = "piplate" }, //This name must be the same as whatever is in the device tree
+	{ .compatible = "wallyware,piplate" }, //This name must be the same as whatever is in the device tree
 	{},
 };
 
@@ -136,6 +136,16 @@ static int piplate_spi_message(struct piplate_dev *dev, struct message *m){
 		printk(KERN_DEBUG "Address: %d\n", m->addr);
 		printk(KERN_DEBUG "Command number: %d\n", m->cmd);
 		printk(KERN_DEBUG "Bytes to return: %d\n", m->bytesToReturn);
+	}
+
+	j0 = jiffies;
+	while(!gpiod_get_value(dev->ack_pin)){
+		if(time_after(jiffies, j0 + (HZ/100))){
+			if(debug_level >= DEBUG_LEVEL_ERR)
+				printk(KERN_ERR "Timed out while waiting for ACK bit high\n");
+			status = -EIO;
+			goto start;
+		}
 	}
 
 	gpiod_set_value(dev->frame_pin, 1);
@@ -332,7 +342,6 @@ static int piplate_probe(struct spi_device *spi){
 		return -ENOMEM;
 	}
 
-	//spi->mode = 0x04;
 	piplate_spi->spi = spi;
 	piplate_spi->max_speed_hz = MAX_SPEED_HZ;
 
@@ -426,6 +435,31 @@ static const struct file_operations piplate_fops = {
 	.unlocked_ioctl = piplate_ioctl,
 };
 
+static int setup_gpio(struct piplate_dev *dev){
+	if((dev->frame_pin = gpio_to_desc(FRAME)) < 0)
+		goto err;
+
+	if((dev->ack_pin = gpio_to_desc(ACK)) < 0)
+		goto free_frame;
+
+	if((dev->int_pin = gpio_to_desc(INT)) < 0)
+		goto free_ack;
+
+	if(gpiod_direction_input(dev->ack_pin) || gpiod_direction_output(dev->frame_pin, 0) || gpiod_direction_input(dev->int_pin))
+		goto free_int;
+
+	return 0;
+
+	free_int:
+		gpiod_put(piplate_spi->int_pin);
+	free_ack:
+		gpiod_put(piplate_spi->ack_pin);
+	free_frame:
+		gpiod_put(piplate_spi->frame_pin);
+	err:
+		return -EIO;
+}
+
 static int __init piplate_spi_init(void){
 	int error = -EIO;
 
@@ -441,35 +475,10 @@ static int __init piplate_spi_init(void){
 
 	mutex_init(&piplate_spi->lock);
 
-	if((piplate_spi->frame_pin = gpio_to_desc(FRAME)) < 0){
-		if(debug_level >= DEBUG_LEVEL_ERR)
-			printk(KERN_ERR "Failiure to request FRAME pin\n");
-		goto free_mem;
-	}
-
-	if((piplate_spi->ack_pin = gpio_to_desc(ACK)) < 0){
-		if(debug_level >= DEBUG_LEVEL_ERR)
-			printk(KERN_ERR "Failiure to request ACK pin\n");
-		goto free_frame;
-	}
-
-	if((piplate_spi->int_pin = gpio_to_desc(INT)) < 0){
-		if(debug_level >= DEBUG_LEVEL_ERR)
-			printk(KERN_ERR "Failiure to request ACK pin\n");
-		goto free_ack;
-	}
-
-	if(gpiod_direction_input(piplate_spi->ack_pin) || gpiod_direction_output(piplate_spi->frame_pin, 0) || gpiod_direction_input(piplate_spi->int_pin)){
-		if(debug_level >= DEBUG_LEVEL_ERR)
-			printk(KERN_ERR "Can't set input/output mode for pins\n");
-		error = -EPERM;
-		goto free_int;
-	}
-
 	if((error = alloc_chrdev_region(&piplate_spi_num, 0, 1, DEV_NAME))){
 		if(debug_level >= DEBUG_LEVEL_ERR)
 			printk(KERN_ERR "Error while allocating device number\n");
-		goto free_int;
+		goto free_mem;
 	}
 
 	if(!(piplate_spi_class = class_create(THIS_MODULE, DEV_NAME))){
@@ -486,10 +495,16 @@ static int __init piplate_spi_init(void){
 		goto destroy_class;
 	}
 
+	if((error = setup_gpio(piplate_spi))){
+		if(debug_level >= DEBUG_LEVEL_ERR)
+			printk(KERN_ERR "Error while initializing pins for GPIO\n");
+		goto destroy_dev;
+	}
+
 	if((error = spi_register_driver(&piplate_driver))){
 		if(debug_level >= DEBUG_LEVEL_ERR)
 			printk(KERN_ERR "Error while registering driver\n");
-		goto destroy_dev;
+		goto unregister_pins;
 	}
 
 	if(!(piplate_spi_cdev = cdev_alloc())){
@@ -515,18 +530,16 @@ static int __init piplate_spi_init(void){
 
 	unregister_spi:
 		spi_unregister_driver(&piplate_driver);
+	unregister_pins:
+		gpiod_put(piplate_spi->int_pin);
+		gpiod_put(piplate_spi->ack_pin);
+		gpiod_put(piplate_spi->frame_pin);
 	destroy_dev:
 		device_destroy(piplate_spi_class, piplate_spi_num);
 	destroy_class:
 		class_destroy(piplate_spi_class);
 	unregister_chrdev:
 		unregister_chrdev_region(piplate_spi_num, 1);
-	free_int:
-		gpiod_put(piplate_spi->int_pin);
-	free_ack:
-		gpiod_put(piplate_spi->ack_pin);
-	free_frame:
-		gpiod_put(piplate_spi->frame_pin);
 	free_mem:
 		kfree(piplate_spi);
 	end:
@@ -539,12 +552,12 @@ static void __exit piplate_spi_exit(void){
 
 	cdev_del(piplate_spi_cdev);
 	spi_unregister_driver(&piplate_driver);
-	device_destroy(piplate_spi_class, piplate_spi_num);
-	class_destroy(piplate_spi_class);
-	unregister_chrdev_region(piplate_spi_num, 1);
 	gpiod_put(piplate_spi->int_pin);
 	gpiod_put(piplate_spi->ack_pin);
 	gpiod_put(piplate_spi->frame_pin);
+	device_destroy(piplate_spi_class, piplate_spi_num);
+	class_destroy(piplate_spi_class);
+	unregister_chrdev_region(piplate_spi_num, 1);
 	kfree(piplate_spi);
 
 	if(debug_level == DEBUG_LEVEL_ALL)
